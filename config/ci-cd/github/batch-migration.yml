@@ -1,0 +1,219 @@
+name: Batch Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_id:
+        description: 'Batch identifier'
+        required: true
+        default: 'production-tier1'
+      vm_list:
+        description: 'List of VMs to migrate (one per line)'
+        required: true
+        default: 'web-server-01\nweb-server-02\nweb-server-03'
+      target_namespace:
+        description: 'Target namespace'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - development
+          - testing
+      network_mapping:
+        description: 'Network mapping (source:destination)'
+        required: true
+        default: 'VM Network:vlan-10-production'
+      storage_mapping:
+        description: 'Storage mapping (source:destination)'
+        required: true
+        default: 'datastore-ssd:storage-class-hdd'
+      skip_validation:
+        description: 'Skip pre/post validation'
+        required: false
+        default: 'false'
+        type: boolean
+      auto_rollback:
+        description: 'Enable automatic rollback on failure'
+        required: false
+        default: 'true'
+        type: boolean
+
+env:
+  MIGRATION_TYPE: 'batch'
+  ANSIBLE_FORCE_COLOR: 'true'
+
+jobs:
+  validate:
+    name: Pre-Migration Validation
+    runs-on: ubuntu-latest
+    if: github.event.inputs.skip_validation != 'true'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Set up Migration Environment
+        run: |
+          echo "BATCH_ID=${{ github.event.inputs.batch_id }}" >> $GITHUB_ENV
+          echo "TARGET_NAMESPACE=${{ github.event.inputs.target_namespace }}" >> $GITHUB_ENV
+      
+      - name: Run Pre-Flight Validation
+        run: |
+          chmod +x config/validation/pre-flight-check.sh
+          ./config/validation/pre-flight-check.sh
+
+  parse:
+    name: Parse VM List
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Parse VM List
+        run: |
+          cat > /tmp/vm_list.txt << 'EOF'
+          ${{ github.event.inputs.vm_list }}
+          EOF
+          sed -i '/^$/d' /tmp/vm_list.txt
+          VM_COUNT=$(wc -l < /tmp/vm_list.txt)
+          echo "VM Count: $VM_COUNT"
+          echo "VM_COUNT=$VM_COUNT" >> $GITHUB_ENV
+          cat /tmp/vm_list.txt
+      
+      - name: Upload VM List
+        uses: actions/upload-artifact@v3
+        with:
+          name: vm-list
+          path: /tmp/vm_list.txt
+          retention-days: 1
+
+  migrate:
+    name: Execute Batch Migration
+    runs-on: ubuntu-latest
+    needs: [validate, parse]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Download VM List
+        uses: actions/download-artifact@v3
+        with:
+          name: vm-list
+          path: /tmp
+      
+      - name: Set up Migration Environment
+        run: |
+          echo "BATCH_ID=${{ github.event.inputs.batch_id }}" >> $GITHUB_ENV
+          echo "TARGET_NAMESPACE=${{ github.event.inputs.target_namespace }}" >> $GITHUB_ENV
+          echo "NETWORK_MAPPING=${{ github.event.inputs.network_mapping }}" >> $GITHUB_ENV
+          echo "STORAGE_MAPPING=${{ github.event.inputs.storage_mapping }}" >> $GITHUB_ENV
+          VM_COUNT=$(wc -l < /tmp/vm_list.txt)
+          echo "Migrating $VM_COUNT VMs in batch $BATCH_ID"
+      
+      - name: Execute Batch Migration
+        run: |
+          cd config/ansible
+          ansible-playbook playbooks/site.yml \
+            -e "batch_id=$BATCH_ID" \
+            -e "vm_list=@/tmp/vm_list.txt" \
+            -e "target_namespace=$TARGET_NAMESPACE" \
+            -e "network_mapping=$NETWORK_MAPPING" \
+            -e "storage_mapping=$STORAGE_MAPPING" \
+            -e "migration_type=batch"
+        timeout-minutes: 360
+
+  validate-post:
+    name: Post-Migration Validation
+    runs-on: ubuntu-latest
+    needs: migrate
+    if: github.event.inputs.skip_validation != 'true'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Download VM List
+        uses: actions/download-artifact@v3
+        with:
+          name: vm-list
+          path: /tmp
+      
+      - name: Set up Migration Environment
+        run: |
+          echo "BATCH_ID=${{ github.event.inputs.batch_id }}" >> $GITHUB_ENV
+          echo "TARGET_NAMESPACE=${{ github.event.inputs.target_namespace }}" >> $GITHUB_ENV
+      
+      - name: Run Post-Migration Validation
+        run: |
+          chmod +x config/validation/post-migration-validation.sh
+          while read -r vm_name; do
+            ./config/validation/post-migration-validation.sh \
+              --vm-name "$vm_name" \
+              --namespace "$TARGET_NAMESPACE" || echo "Validation failed for $vm_name"
+          done < /tmp/vm_list.txt
+
+  report:
+    name: Generate Migration Report
+    runs-on: ubuntu-latest
+    needs: [migrate, validate-post]
+    steps:
+      - name: Download VM List
+        uses: actions/download-artifact@v3
+        with:
+          name: vm-list
+          path: /tmp
+      
+      - name: Generate Report
+        run: |
+          VM_COUNT=$(wc -l < /tmp/vm_list.txt)
+          cat > batch-migration-report.txt << EOF
+Batch Migration Report
+=======================
+Date: $(date)
+Batch ID: ${{ github.event.inputs.batch_id }}
+Target Namespace: ${{ github.event.inputs.target_namespace }}
+VM Count: $VM_COUNT
+Network Mapping: ${{ github.event.inputs.network_mapping }}
+Storage Mapping: ${{ github.event.inputs.storage_mapping }}
+Migration Type: ${{ env.MIGRATION_TYPE }}
+Workflow ID: ${{ github.run_id }}
+Workflow URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+Batch migration completed successfully.
+EOF
+          cat batch-migration-report.txt
+      
+      - name: Upload Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: batch-migration-report
+          path: batch-migration-report.txt
+          retention-days: 30
+
+  rollback:
+    name: Automatic Rollback
+    runs-on: ubuntu-latest
+    needs: [parse, migrate]
+    if: failure() && github.event.inputs.auto_rollback == 'true'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Download VM List
+        uses: actions/download-artifact@v3
+        with:
+          name: vm-list
+          path: /tmp
+      
+      - name: Set up Migration Environment
+        run: |
+          echo "BATCH_ID=${{ github.event.inputs.batch_id }}" >> $GITHUB_ENV
+          echo "TARGET_NAMESPACE=${{ github.event.inputs.target_namespace }}" >> $GITHUB_ENV
+      
+      - name: Execute Rollback
+        run: |
+          cd config/ansible
+          while read -r vm_name; do
+            ansible-playbook playbooks/rollback.yml \
+              -e "vm_name=$vm_name" \
+              -e "target_namespace=$TARGET_NAMESPACE" || echo "Rollback failed for $vm_name"
+          done < /tmp/vm_list.txt

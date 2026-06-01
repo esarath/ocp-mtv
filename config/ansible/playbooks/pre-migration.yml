@@ -1,0 +1,208 @@
+---
+# Pre-Migration Playbook
+# This playbook performs pre-migration validation and preparation
+
+- name: VMware to OpenShift Pre-Migration Preparation
+  hosts: localhost
+  gather_facts: true
+  vars:
+    skip_validation: false
+    pre_flight_timeout: 1800
+  
+  tasks:
+    - name: Display pre-migration phase start
+      debug:
+        msg: "Starting pre-migration preparation for VM: {{ vm_name }}"
+
+    - name: Check if pre-flight validation is enabled
+      set_fact:
+        run_validation: "{{ not skip_validation }}"
+
+    - name: Run pre-flight validation if enabled
+      block:
+        - name: Execute pre-flight validation script
+          script: ../validation/pre-flight-check.sh
+          environment:
+            VM_NAME: "{{ vm_name }}"
+          register: pre_flight_result
+          failed_when: pre_flight_result.rc != 0
+        
+        - name: Display pre-flight validation results
+          debug:
+            var: pre_flight_result.stdout_lines
+          
+        - name: Save pre-flight results to file
+          copy:
+            content: "{{ pre_flight_result.stdout }}"
+            dest: "/tmp/pre-flight-{{ vm_name }}-{{ ansible_date_time.epoch }}.log"
+            mode: '0644'
+      
+      when: run_validation
+
+    - name: Check vCenter connectivity
+      block:
+        - name: Test vCenter connection
+          uri:
+            url: "https://{{ vcenter.host }}/sdk"
+            validate_certs: false
+            method: GET
+            status_code: 200
+          register: vcenter_check
+          when: vcenter.host is defined
+          
+        - name: Display vCenter connectivity result
+          debug:
+            msg: "vCenter connectivity: {{ 'OK' if vcenter_check is skipped or vcenter_check.status == 200 else 'FAILED' }}"
+      
+      rescue:
+        - name: vCenter connectivity failed
+          debug:
+            msg: "vCenter connectivity check failed - ensure credentials and network are configured properly"
+          when: vcenter_check is defined
+
+    - name: Check OpenShift connectivity
+      block:
+        - name: Test OpenShift connection
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Node
+          register: openshift_check
+          
+        - name: Display OpenShift connectivity result
+          debug:
+            msg: "OpenShift connectivity: {{ 'OK' if openshift_check.resources is defined else 'FAILED' }}"
+      
+      rescue:
+        - name: OpenShift connectivity failed
+          debug:
+            msg: "OpenShift connectivity check failed - ensure oc login and network are configured properly"
+
+    - name: Verify MTV namespace exists
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ openshift.mtv_namespace }}"
+        state: present
+      register: mtv_namespace
+      
+    - name: Display MTV namespace status
+      debug:
+        msg: "MTV namespace status: {{ mtv_namespace.state }}"
+
+    - name: Verify target namespace exists
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ target_namespace }}"
+        state: present
+      register: target_namespace_result
+      
+    - name: Display target namespace status
+      debug:
+        msg: "Target namespace status: {{ target_namespace_result.state }}"
+
+    - name: Verify network attachment definitions exist
+      kubernetes.core.k8s_info:
+        api_version: k8s.cni.cncf.io/v1
+        kind: NetworkAttachmentDefinition
+        namespace: "{{ openshift.mtv_namespace }}"
+      register: network_attachments
+      
+    - name: Display network attachment definitions
+      debug:
+        msg: "Found {{ network_attachments.resources | length }} network attachment definitions"
+      
+    - name: Check for required network attachment
+      debug:
+        msg: "Checking for network attachment: {{ network_mapping.split(':')[1] }}"
+      when: network_mapping is defined
+
+    - name: Verify storage classes exist
+      kubernetes.core.k8s_info:
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+      register: storage_classes
+      
+    - name: Display storage classes
+      debug:
+        msg: "Found {{ storage_classes.resources | length }} storage classes"
+      
+    - name: Check for required storage class
+      debug:
+        msg: "Checking for storage class: {{ storage_mapping.split(':')[1] }}"
+      when: storage_mapping is defined
+
+    - name: Verify providers exist
+      block:
+        - name: Check vSphere provider
+          kubernetes.core.k8s_info:
+            api_version: fork.konveyor.io/v1beta1
+            kind: Provider
+            name: vsphere-provider
+            namespace: "{{ openshift.mtv_namespace }}"
+          register: vsphere_provider
+          
+        - name: Check OpenShift provider
+          kubernetes.core.k8s_info:
+            api_version: fork.konveyor.io/v1beta1
+            kind: Provider
+            name: openshift-provider
+            namespace: "{{ openshift.mtv_namespace }}"
+          register: openshift_provider
+          
+        - name: Display provider status
+          debug:
+            msg:
+              - "vSphere provider: {{ 'Found' if vsphere_provider.resources else 'Not found' }}"
+              - "OpenShift provider: {{ 'Found' if openshift_provider.resources else 'Not found' }}"
+      
+      rescue:
+        - name: Provider verification failed
+          debug:
+            msg: "Provider verification failed - ensure providers are properly configured"
+
+    - name: Verify secrets exist
+      block:
+        - name: Check vCenter credentials
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            name: vcenter-credentials
+            namespace: "{{ openshift.mtv_namespace }}"
+          register: vcenter_secret
+          
+        - name: Check OpenShift credentials
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Secret
+            name: openshift-credentials
+            namespace: "{{ openshift.mtv_namespace }}"
+          register: openshift_secret
+          
+        - name: Display secret status
+          debug:
+            msg:
+              - "vCenter credentials: {{ 'Found' if vcenter_secret.resources else 'Not found' }}"
+              - "OpenShift credentials: {{ 'Found' if openshift_secret.resources else 'Not found' }}"
+      
+      rescue:
+        - name: Secret verification failed
+          debug:
+            msg: "Secret verification failed - ensure credentials are properly configured"
+
+    - name: Display pre-migration completion
+      debug:
+        msg: "Pre-migration preparation completed successfully for VM: {{ vm_name }}"
+
+    - name: Save pre-migration state
+      copy:
+        content: |
+          pre_migration_state:
+            vm_name: "{{ vm_name }}"
+            target_namespace: "{{ target_namespace }}"
+            network_mapping: "{{ network_mapping }}"
+            storage_mapping: "{{ storage_mapping }}"
+            validation_passed: "{{ pre_flight_result.rc | default(0) == 0 if run_validation else true }}"
+            timestamp: "{{ ansible_date_time.iso8601 }}"
+        dest: "/tmp/pre-migration-state-{{ vm_name }}.yml"
+        mode: '0644'

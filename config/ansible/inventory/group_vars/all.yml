@@ -1,0 +1,60 @@
+---
+# MTV Global Variables
+mtv_project:
+  name: "VMware to OpenShift Migration"
+  version: "1.0"
+  environment: "production"
+
+# Default vCenter settings
+vcenter_defaults:
+  server: "vcenter.example.com"
+  username: "migration-user@vsphere.local"
+  datacenter: "Datacenter"
+  validate_certs: false
+  skip_tls_verify: true
+
+# Default OpenShift settings
+openshift_defaults:
+  api_url: "https://api.openshift.example.com:6443"
+  username: "kubeadmin"
+  mtv_namespace: "openshift-mtv"
+  validate_certs: false
+
+# Default networking
+networking_defaults:
+  production_vlan: "vlan-10-production"
+  development_vlan: "vlan-20-development"
+  management_vlan: "vlan-30-management"
+  default_bridge: "br-ex"
+
+# Default storage
+storage_defaults:
+  ssd_class: "storage-class-ssd"
+  hdd_class: "storage-class-hdd"
+  nfs_class: "storage-class-nfs"
+  default_class: "storage-class-hdd"
+
+# Migration settings
+migration_defaults:
+  timeout_seconds: 3600
+  retry_count: 3
+  warm_migration_cutover_seconds: 300
+  warm_migration_sync_interval_seconds: 600
+
+# Validation settings
+validation_defaults:
+  pre_flight_required: true
+  post_migration_required: true
+  skip_validation: false
+
+# Rollback settings
+rollback_defaults:
+  auto_rollback_on_failure: true
+  cleanup_on_rollback: true
+  restore_source_vm: false
+
+# Logging settings
+logging_defaults:
+  log_directory: "/var/log/mtv"
+  log_level: "INFO"
+  log_retention_days: 30

@@ -1,0 +1,57 @@
+apiVersion: fork.konveyor.io/v1beta1
+kind: MigrationPlan
+metadata:
+  name: batch-migration-production-tier1
+  namespace: openshift-mtv
+  labels:
+    app: mtv
+    migration-type: batch
+    batch-id: "production-tier1"
+  annotations:
+    description: "Batch migration for production tier 1 web servers"
+    vm-count: "3"
+spec:
+  provider_sources:
+    - name: vsphere-provider
+      namespace: openshift-mtv
+  provider_destinations:
+    - name: openshift-provider
+      namespace: openshift-mtv
+  migrations:
+    - vm:
+        id: "vm-1001"
+        name: "web-server-01"
+        category: "web-server"
+      target_namespace: "production"
+      target_vm_name: "web-server-01"
+      network_mappings:
+        - source: "VM Network"
+          destination: "vlan-10-production"
+      storage_mappings:
+        - source: "datastore-ssd"
+          destination: "storage-class-hdd"
+    - vm:
+        id: "vm-1002"
+        name: "web-server-02"
+        category: "web-server"
+      target_namespace: "production"
+      target_vm_name: "web-server-02"
+      network_mappings:
+        - source: "VM Network"
+          destination: "vlan-10-production"
+      storage_mappings:
+        - source: "datastore-ssd"
+          destination: "storage-class-hdd"
+    - vm:
+        id: "vm-1003"
+        name: "web-server-03"
+        category: "web-server"
+      target_namespace: "production"
+      target_vm_name: "web-server-03"
+      network_mappings:
+        - source: "VM Network"
+          destination: "vlan-10-production"
+      storage_mappings:
+        - source: "datastore-ssd"
+          destination: "storage-class-hdd"
+  warm_migration: false

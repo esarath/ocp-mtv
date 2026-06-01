@@ -1,0 +1,78 @@
+apiVersion: fork.konveyor.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-provider
+  namespace: openshift-mtv
+  labels:
+    app: mtv
+    provider-type: vsphere
+spec:
+  type: vsphere
+  secret:
+    name: vcenter-credentials
+    namespace: openshift-mtv
+  settings:
+    vddk_init_image: quay.io/konveyor/forklift-vddk:latest
+    url: "https://vcenter.example.com"
+    skip_tls_verify: true
+---
+# Advanced vSphere provider configuration
+apiVersion: fork.konveyor.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-provider-advanced
+  namespace: openshift-mtv
+  labels:
+    app: mtv
+    provider-type: vsphere
+spec:
+  type: vsphere
+  secret:
+    name: vcenter-credentials
+    namespace: openshift-mtv
+  settings:
+    vddk_init_image: quay.io/konveyor/forklift-vddk:latest
+    url: "https://vcenter.example.com"
+    skip_tls_verify: true
+    # Advanced settings
+    insecure_skip_tls_verify: true
+    cacertificate: |
+      -----BEGIN CERTIFICATE-----
+      YOUR_VCENTER_CA_CERTIFICATE
+      -----END CERTIFICATE-----
+---
+# vSphere provider with resource limits
+apiVersion: fork.konveyor.io/v1beta1
+kind: Provider
+metadata:
+  name: vsphere-provider-with-limits
+  namespace: openshift-mtv
+  labels:
+    app: mtv
+    provider-type: vsphere
+spec:
+  type: vsphere
+  secret:
+    name: vcenter-credentials
+    namespace: openshift-mtv
+  settings:
+    vddk_init_image: quay.io/konveyor/forklift-vddk:latest
+    url: "https://vcenter.example.com"
+    skip_tls_verify: true
+---
+# Conversion pod resource limits
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vsphere-provider-config
+  namespace: openshift-mtv
+data:
+  resource_limits: |
+    cpu_limit: "4"
+    memory_limit: "8Gi"
+    cpu_request: "2"
+    memory_request: "4Gi"
+  timeout_settings: |
+    connection_timeout: "300"
+    operation_timeout: "1800"
+    snapshot_timeout: "3600"

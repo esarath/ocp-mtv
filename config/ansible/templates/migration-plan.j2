@@ -1,0 +1,40 @@
+apiVersion: fork.konveyor.io/v1beta1
+kind: MigrationPlan
+metadata:
+  name: {{ migration_plan_name }}
+  namespace: {{ openshift.mtv_namespace }}
+  labels:
+    app: mtv
+    migration-type: {{ migration_type | default('cold') }}
+  annotations:
+    description: "{{ migration_type | default('cold') }} migration for VM: {{ vm_name }}"
+    vm-source: "{{ vm_name }}"
+    vm-target: "{{ vm_name }}"
+    generated-by: "ansible"
+    generated-at: "{{ ansible_date_time.iso8601 }}"
+spec:
+  provider_sources:
+    - name: vsphere-provider
+      namespace: {{ openshift.mtv_namespace }}
+  provider_destinations:
+    - name: openshift-provider
+      namespace: {{ openshift.mtv_namespace }}
+  migrations:
+    - vm:
+        id: "{{ vm_id | default('vm-' ~ ansible_date_time.epoch) }}"
+        name: "{{ vm_name }}"
+        category: "{{ vm_category | default('generic') }}"
+      target_namespace: {{ target_namespace }}
+      target_vm_name: "{{ vm_name }}"
+      network_mappings:
+        - source: {{ source_network }}
+          destination: {{ destination_network }}
+      storage_mappings:
+        - source: {{ source_storage }}
+          destination: {{ destination_storage }}
+  warm_migration: {{ warm_migration | default(false) }}
+{% if warm_migration %}
+  warm_migration_settings:
+    cutover_seconds: {{ cutover_seconds | default(300) }}
+    sync_interval_seconds: {{ sync_interval_seconds | default(600) }}
+{% endif %}

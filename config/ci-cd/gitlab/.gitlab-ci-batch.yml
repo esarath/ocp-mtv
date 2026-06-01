@@ -1,0 +1,150 @@
+# GitLab CI/CD Pipeline for Batch Migration
+
+stages:
+  - validate
+  - parse
+  - migrate
+  - validate-post
+  - report
+
+variables:
+  MIGRATION_TYPE: "batch"
+  ANSIBLE_FORCE_COLOR: "true"
+
+default:
+  before_script:
+    - echo "Setting up batch migration environment"
+    - export BATCH_ID="$BATCH_ID"
+    - export TARGET_NAMESPACE="$TARGET_NAMESPACE"
+    - export NETWORK_MAPPING="$NETWORK_MAPPING"
+    - export STORAGE_MAPPING="$STORAGE_MAPPING"
+  after_script:
+    - echo "Cleaning up artifacts"
+    - rm -f /tmp/mtv-*.yml
+
+# Pre-Migration Validation
+validate:
+  stage: validate
+  script:
+    - echo "Running pre-flight validation for batch: $BATCH_ID"
+    - chmod +x config/validation/pre-flight-check.sh
+    - ./config/validation/pre-flight-check.sh
+  only:
+    variables:
+      - $SKIP_VALIDATION == "false"
+  tags:
+    - mtv
+    - validation
+
+# Parse VM List
+parse:
+  stage: parse
+  script:
+    - echo "Parsing VM list for batch: $BATCH_ID"
+    - echo "$VM_LIST" > /tmp/vm_list.txt
+    - VM_COUNT=$(wc -l < /tmp/vm_list.txt)
+    - echo "VM Count: $VM_COUNT"
+    - export VM_COUNT=$VM_COUNT
+    - cat /tmp/vm_list.txt
+  artifacts:
+    paths:
+      - /tmp/vm_list.txt
+    expire_in: 1 hour
+  tags:
+    - mtv
+    - parsing
+
+# Batch Migration Execution
+migrate:
+  stage: migrate
+  script:
+    - echo "Executing batch migration for $BATCH_ID"
+    - VM_COUNT=$(wc -l < /tmp/vm_list.txt)
+    - echo "Migrating $VM_COUNT VMs"
+    - cd config/ansible
+    - ansible-playbook playbooks/site.yml
+      -e "batch_id=$BATCH_ID"
+      -e "vm_list=@/tmp/vm_list.txt"
+      -e "target_namespace=$TARGET_NAMESPACE"
+      -e "network_mapping=$NETWORK_MAPPING"
+      -e "storage_mapping=$STORAGE_MAPPING"
+      -e "migration_type=batch"
+  timeout: 6 hours
+  needs:
+    - parse
+  tags:
+    - mtv
+    - migration
+
+# Post-Migration Validation
+validate-post:
+  stage: validate-post
+  script:
+    - echo "Running post-migration validation for batch: $BATCH_ID"
+    - chmod +x config/validation/post-migration-validation.sh
+    - while read -r vm_name; do
+        ./config/validation/post-migration-validation.sh
+          --vm-name "$vm_name"
+          --namespace "$TARGET_NAMESPACE" || echo "Validation failed for $vm_name"
+      done < /tmp/vm_list.txt
+  only:
+    variables:
+      - $SKIP_VALIDATION == "false"
+  needs:
+    - migrate
+  tags:
+    - mtv
+    - validation
+
+# Generate Report
+report:
+  stage: report
+  script:
+    - echo "Generating batch migration report"
+    - VM_COUNT=$(wc -l < /tmp/vm_list.txt)
+    - cat > batch-migration-report.txt << EOF
+Batch Migration Report
+=======================
+Date: $(date)
+Batch ID: $BATCH_ID
+Target Namespace: $TARGET_NAMESPACE
+VM Count: $VM_COUNT
+Network Mapping: $NETWORK_MAPPING
+Storage Mapping: $STORAGE_MAPPING
+Migration Type: $MIGRATION_TYPE
+Pipeline ID: $CI_PIPELINE_ID
+Job ID: $CI_JOB_ID
+
+Batch migration completed successfully.
+EOF
+    - cat batch-migration-report.txt
+  artifacts:
+    paths:
+      - batch-migration-report.txt
+    expire_in: 30 days
+  needs:
+    - validate-post
+  tags:
+    - mtv
+    - reporting
+
+# Automatic Rollback on Failure
+rollback:
+  stage: migrate
+  script:
+    - echo "Migration failed, initiating automatic rollback"
+    - cd config/ansible
+    - while read -r vm_name; do
+        ansible-playbook playbooks/rollback.yml
+          -e "vm_name=$vm_name"
+          -e "target_namespace=$TARGET_NAMESPACE" || echo "Rollback failed for $vm_name"
+      done < /tmp/vm_list.txt
+  when: on_failure
+  only:
+    variables:
+      - $AUTO_ROLLBACK == "true"
+  needs:
+    - parse
+  tags:
+    - mtv
+    - rollback

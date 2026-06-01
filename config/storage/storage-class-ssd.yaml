@@ -1,0 +1,33 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-class-ssd
+  namespace: openshift-mtv
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: csi.driver.example.com
+parameters:
+  type: ssd
+  iopsPerGB: "10"
+  replication: "3"
+  encrypted: "true"
+  diskType: "premium-ssd"
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-class-ssd-retained
+  namespace: openshift-mtv
+provisioner: csi.driver.example.com
+parameters:
+  type: ssd
+  iopsPerGB: "10"
+  replication: "3"
+  encrypted: "true"
+  diskType: "premium-ssd"
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer

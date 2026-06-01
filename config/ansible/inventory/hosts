@@ -1,0 +1,32 @@
+# MTV Ansible Inventory File
+
+[vmware]
+vcenter.example.com ansible_host=vcenter.example.com ansible_user=vsphere ansible_connection=local
+
+[openshift]
+api.openshift.example.com ansible_host=api.openshift.example.com ansible_user=kubeadmin ansible_connection=kubernetes
+
+[conversion]
+conversion-host-1.example.com
+conversion-host-2.example.com
+conversion-host-3.example.com
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+
+[vmware:vars]
+vmware_host=vcenter.example.com
+vmware_username=migration-user@vsphere.local
+vmware_validate_certs=false
+vmware_datacenter=Datacenter
+
+[openshift:vars]
+openshift_api_url=https://api.openshift.example.com:6443
+openshift_username=kubeadmin
+openshift_validate_certs=false
+mtv_namespace=openshift-mtv
+target_namespace=production
+
+[conversion:vars]
+conversion_host_cpus=4
+conversion_host_memory=8Gi

@@ -1,0 +1,131 @@
+---
+# Cold Migration Playbook
+# This playbook performs cold migration of VMs (VM powered off during migration)
+
+- name: VMware to OpenShift Cold Migration
+  hosts: localhost
+  gather_facts: true
+  vars:
+    vm_name: "{{ lookup('env', 'VM_NAME') | default('web-server-01', true) }}"
+    target_namespace: "{{ lookup('env', 'TARGET_NAMESPACE') | default('production', true) }}"
+    network_mapping: "{{ lookup('env', 'NETWORK_MAPPING') | default('VM Network:vlan-10-production', true) }}"
+    storage_mapping: "{{ lookup('env', 'STORAGE_MAPPING') | default('datastore-ssd:storage-class-hdd', true) }}"
+    migration_timeout: 7200
+  
+  tasks:
+    - name: Display cold migration phase start
+      debug:
+        msg: "Starting cold migration for VM: {{ vm_name }}"
+
+    - name: Parse network mapping
+      set_fact:
+        source_network: "{{ network_mapping.split(':')[0] }}"
+        destination_network: "{{ network_mapping.split(':')[1] }}"
+
+    - name: Parse storage mapping
+      set_fact:
+        source_storage: "{{ storage_mapping.split(':')[0] }}"
+        destination_storage: "{{ storage_mapping.split(':')[1] }}"
+
+    - name: Generate migration plan name
+      set_fact:
+        migration_plan_name: "{{ vm_name | replace('.', '-') }}-cold-migration-{{ ansible_date_time.epoch }}"
+
+    - name: Generate migration plan YAML
+      template:
+        src: ../templates/migration-plan.j2
+        dest: "/tmp/{{ migration_plan_name }}.yaml"
+        mode: '0644'
+      vars:
+        migration_type: "cold"
+        warm_migration: false
+
+    - name: Display migration plan details
+      debug:
+        msg:
+          - "Migration Plan: {{ migration_plan_name }}"
+          - "VM Name: {{ vm_name }}"
+          - "Target Namespace: {{ target_namespace }}"
+          - "Source Network: {{ source_network }}"
+          - "Destination Network: {{ destination_network }}"
+          - "Source Storage: {{ source_storage }}"
+          - "Destination Storage: {{ destination_storage }}"
+
+    - name: Apply migration plan to OpenShift
+      kubernetes.core.k8s:
+        state: present
+        src: "/tmp/{{ migration_plan_name }}.yaml"
+        wait: true
+        wait_timeout: 300
+      register: migration_plan_result
+
+    - name: Wait for migration to start
+      kubernetes.core.k8s_info:
+        api_version: fork.konveyor.io/v1beta1
+        kind: Migration
+        name: "{{ migration_plan_name }}"
+        namespace: "{{ openshift.mtv_namespace }}"
+      register: migration_info
+      until: migration_info.resources is defined
+      retries: 10
+      delay: 10
+
+    - name: Wait for migration to complete
+      kubernetes.core.k8s_info:
+        api_version: fork.konveyor.io/v1beta1
+        kind: Migration
+        name: "{{ migration_plan_name }}"
+        namespace: "{{ openshift.mtv_namespace }}"
+      register: migration_status
+      until: migration_status.resources[0].status.phase == "Completed" or migration_status.resources[0].status.phase == "Failed"
+      retries: 120
+      delay: 60
+      timeout: "{{ migration_timeout }}"
+
+    - name: Check migration status
+      fail:
+        msg: "Migration failed with status: {{ migration_status.resources[0].status.phase }}"
+      when: migration_status.resources[0].status.phase == "Failed"
+
+    - name: Display migration completion
+      debug:
+        msg: "Cold migration completed successfully for VM: {{ vm_name }}"
+
+    - name: Get migrated VM details
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ target_namespace }}"
+      register: migrated_vm
+      until: migrated_vm.resources is defined
+      retries: 20
+      delay: 5
+
+    - name: Display migrated VM details
+      debug:
+        msg:
+          - "Migrated VM: {{ vm_name }}"
+          - "Namespace: {{ target_namespace }}"
+          - "VM Status: {{ migrated_vm.resources[0].status.printableStatus if migrated_vm.resources else 'Not available' }}"
+          - "Migration Plan: {{ migration_plan_name }}"
+
+    - name: Save migration state
+      copy:
+        content: |
+          cold_migration_state:
+            vm_name: "{{ vm_name }}"
+            target_namespace: "{{ target_namespace }}"
+            migration_plan_name: "{{ migration_plan_name }}"
+            network_mapping: "{{ network_mapping }}"
+            storage_mapping: "{{ storage_mapping }}"
+            migration_status: "{{ migration_status.resources[0].status.phase }}"
+            timestamp: "{{ ansible_date_time.iso8601 }}"
+        dest: "/tmp/cold-migration-state-{{ vm_name }}.yml"
+        mode: '0644'
+
+    - name: Cleanup migration plan file
+      file:
+        path: "/tmp/{{ migration_plan_name }}.yaml"
+        state: absent
+      when: migration_status.resources[0].status.phase == "Completed"

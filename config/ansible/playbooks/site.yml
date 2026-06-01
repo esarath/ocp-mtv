@@ -1,0 +1,83 @@
+---
+# MTV Site Playbook
+# This is the main playbook that orchestrates the entire migration process
+
+- name: VMware to OpenShift Migration - Full Process
+  hosts: localhost
+  gather_facts: true
+  vars:
+    migration_phases:
+      - pre_migration
+      - migration
+      - post_migration
+    
+    # Default variables
+    vm_name: "{{ lookup('env', 'VM_NAME') | default('web-server-01', true) }}"
+    migration_type: "{{ lookup('env', 'MIGRATION_TYPE') | default('cold', true) }}"
+    target_namespace: "{{ lookup('env', 'TARGET_NAMESPACE') | default('production', true) }}"
+    
+    # Network and storage mappings
+    network_mapping: "{{ lookup('env', 'NETWORK_MAPPING') | default('VM Network:vlan-10-production', true) }}"
+    storage_mapping: "{{ lookup('env', 'STORAGE_MAPPING') | default('datastore-ssd:storage-class-hdd', true) }}"
+    
+    # Migration options
+    skip_validation: false
+    auto_rollback: true
+    cleanup_on_failure: true
+
+  pre_tasks:
+    - name: Display migration information
+      debug:
+        msg:
+          - "VM Name: {{ vm_name }}"
+          - "Migration Type: {{ migration_type }}"
+          - "Target Namespace: {{ target_namespace }}"
+          - "Network Mapping: {{ network_mapping }}"
+          - "Storage Mapping: {{ storage_mapping }}"
+    
+    - name: Validate required variables
+      assert:
+        that:
+          - vm_name is defined
+          - vm_name | length > 0
+          - migration_type in ['cold', 'warm']
+          - target_namespace is defined
+          - target_namespace | length > 0
+        fail_msg: "Required variables are not properly defined"
+        success_msg: "Variables validated successfully"
+
+- name: Pre-Migration Phase
+  import_playbook: pre-migration.yml
+  when: "'pre_migration' in migration_phases"
+
+- name: Migration Phase
+  import_playbook: "{{ migration_type }}-migration.yml"
+  when: "'migration' in migration_phases"
+
+- name: Post-Migration Phase
+  import_playbook: post-migration.yml
+  when: "'post_migration' in migration_phases"
+
+- name: Migration Summary
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Display migration completion
+      debug:
+        msg:
+          - "Migration process completed successfully"
+          - "VM: {{ vm_name }}"
+          - "Type: {{ migration_type }}"
+          - "Target: {{ target_namespace }}"
+          - "Timestamp: {{ ansible_date_time.iso8601 }}"
+    
+    - name: Generate migration report
+      template:
+        src: ../templates/migration-report.j2
+        dest: "/tmp/mtv-migration-report-{{ ansible_date_time.epoch }}.txt"
+        mode: '0644'
+      when: inventory_hostname == 'localhost'
+    
+    - name: Display report location
+      debug:
+        msg: "Migration report generated: /tmp/mtv-migration-report-{{ ansible_date_time.epoch }}.txt"

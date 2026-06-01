@@ -1,0 +1,33 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-class-nfs
+  namespace: openshift-mtv
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: nfs.csi.k8s.io
+parameters:
+  type: nfs
+  server: "nfs-server.example.com"
+  share: "/export/mtv-storage"
+  mountPermissions: "0755"
+  readOnly: "false"
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-class-nfs-retained
+  namespace: openshift-mtv
+provisioner: nfs.csi.k8s.io
+parameters:
+  type: nfs
+  server: "nfs-server.example.com"
+  share: "/export/mtv-storage"
+  mountPermissions: "0755"
+  readOnly: "false"
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: Immediate

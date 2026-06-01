@@ -1,0 +1,34 @@
+apiVersion: fork.konveyor.io/v1beta1
+kind: MigrationPlan
+metadata:
+  name: warm-migration-template
+  namespace: openshift-mtv
+  labels:
+    app: mtv
+    migration-type: warm
+  annotations:
+    description: "Warm migration template - customize before use"
+spec:
+  provider_sources:
+    - name: vsphere-provider
+      namespace: openshift-mtv
+  provider_destinations:
+    - name: openshift-provider
+      namespace: openshift-mtv
+  migrations:
+    - vm:
+        id: "vm-12345"  # Replace with actual VM ID from vCenter
+        name: "source-vm-name"  # Replace with actual VM name
+        category: "database"  # Optional: for categorization
+      target_namespace: "production"  # Replace with target namespace
+      target_vm_name: "target-vm-name"  # Replace with target VM name
+      network_mappings:
+        - source: "VM Network"  # Source network in vCenter
+          destination: "vlan-10-production"  # Destination network in OpenShift
+      storage_mappings:
+        - source: "datastore-ssd"  # Source datastore in vCenter
+          destination: "storage-class-ssd"  # Destination storage class in OpenShift
+  warm_migration: true
+  warm_migration_settings:
+    cutover_seconds: 300  # 5 minutes for cutover window
+    sync_interval_seconds: 600  # 10 minutes for sync interval

@@ -1,0 +1,33 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-class-hdd
+  namespace: openshift-mtv
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: csi.driver.example.com
+parameters:
+  type: hdd
+  iopsPerGB: "2"
+  replication: "3"
+  encrypted: "true"
+  diskType: "standard-hdd"
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: storage-class-hdd-retained
+  namespace: openshift-mtv
+provisioner: csi.driver.example.com
+parameters:
+  type: hdd
+  iopsPerGB: "2"
+  replication: "3"
+  encrypted: "true"
+  diskType: "standard-hdd"
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer

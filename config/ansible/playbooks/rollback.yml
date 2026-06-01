@@ -1,0 +1,177 @@
+---
+# Rollback Playbook
+# This playbook performs rollback of failed or problematic migrations
+
+- name: VMware to OpenShift Migration Rollback
+  hosts: localhost
+  gather_facts: true
+  vars:
+    vm_name: "{{ lookup('env', 'VM_NAME') | default('web-server-01', true) }}"
+    target_namespace: "{{ lookup('env', 'TARGET_NAMESPACE') | default('production', true) }}"
+    migration_plan_name: "{{ lookup('env', 'MIGRATION_PLAN_NAME') | default(omit) }}"
+    restore_source_vm: "{{ lookup('env', 'RESTORE_SOURCE_VM') | default('false', true) }}"
+    cleanup_resources: true
+    force_rollback: false
+  
+  tasks:
+    - name: Display rollback phase start
+      debug:
+        msg: "Starting rollback for VM: {{ vm_name }}"
+
+    - name: Display rollback warnings
+      debug:
+        msg:
+          - "WARNING: This action cannot be undone!"
+          - "VM will be deleted from OpenShift"
+          - "PVCs and associated resources will be removed"
+          - "Source VM will be restored if requested"
+
+    - name: Confirm rollback if not forced
+      pause:
+        prompt: "Are you sure you want to proceed with rollback? (yes/no)"
+      register: rollback_confirm
+      when: not force_rollback
+
+    - name: Fail if not confirmed
+      fail:
+        msg: "Rollback cancelled by user"
+      when: not force_rollback and rollback_confirm.user_input != "yes"
+
+    - name: Stop VM if running
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ target_namespace }}"
+        state: stopped
+      register: stop_result
+      ignore_errors: true
+
+    - name: Display VM stop result
+      debug:
+        msg: "VM stop result: {{ 'Success' if stop_result.changed else 'Not running or error' }}"
+
+    - name: Delete VM
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ target_namespace }}"
+        state: absent
+      register: delete_vm_result
+
+    - name: Display VM deletion result
+      debug:
+        msg: "VM deletion: {{ 'Success' if delete_vm_result.changed else 'VM not found' }}"
+
+    - name: Delete associated PVCs
+      block:
+        - name: Get VM PVCs
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: PersistentVolumeClaim
+            namespace: "{{ target_namespace }}"
+          register: vm_pvcs
+        
+        - name: Delete PVCs associated with VM
+          kubernetes.core.k8s:
+            api_version: v1
+            kind: PersistentVolumeClaim
+            name: "{{ item.metadata.name }}"
+            namespace: "{{ target_namespace }}"
+            state: absent
+          register: pvc_deletion
+          loop: "{{ vm_pvcs.resources }}"
+          when: 
+            - vm_pvcs.resources is defined
+            - item.metadata.annotations is defined
+            - item.metadata.annotations['mtv.konveyor.io/source-vm'] is defined
+            - item.metadata.annotations['mtv.konveyor.io/source-vm'] == vm_name
+          loop_control:
+            label: "{{ item.metadata.name }}"
+        
+        - name: Display PVC deletion results
+          debug:
+            msg: "Deleted {{ pvc_deletion.results | selectattr('changed') | list | length }} PVCs"
+      
+      when: cleanup_resources
+
+    - name: Delete migration plan if specified
+      block:
+        - name: Check if migration plan name is specified
+          debug:
+            msg: "Migration plan name not specified, skipping migration plan deletion"
+          when: migration_plan_name is not defined
+        
+        - name: Delete migration plan
+          kubernetes.core.k8s:
+            api_version: fork.konveyor.io/v1beta1
+            kind: MigrationPlan
+            name: "{{ migration_plan_name }}"
+            namespace: "{{ openshift.mtv_namespace }}"
+            state: absent
+          register: migration_plan_deletion
+          when: migration_plan_name is defined
+        
+        - name: Display migration plan deletion result
+          debug:
+            msg: "Migration plan deletion: {{ 'Success' if migration_plan_deletion.changed else 'Not found' }}"
+          when: migration_plan_name is defined
+      
+      when: migration_plan_name is defined
+
+    - name: Restore source VM if requested
+      block:
+        - name: Check if govc is available
+          command: which govc
+          register: govc_check
+          ignore_errors: true
+          changed_when: false
+        
+        - name: Restore source VM using govc
+          command: govc vm.power -on "{{ vm_name }}"
+          register: vm_restore
+          when: govc_check.rc == 0
+        
+        - name: Display source VM restore result
+          debug:
+            msg: "Source VM restore: {{ 'Success' if vm_restore.changed else 'Failed or govc not available' }}"
+      
+      when: restore_source_vm | bool
+
+    - name: Verify rollback completion
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ target_namespace }}"
+      register: rollback_verify
+      ignore_errors: true
+
+    - name: Display rollback verification
+      debug:
+        msg: "Rollback verification: {{ 'VM successfully removed' if not rollback_verify.resources else 'VM still exists' }}"
+
+    - name: Generate rollback report
+      copy:
+        content: |
+          rollback_report:
+            vm_name: "{{ vm_name }}"
+            target_namespace: "{{ target_namespace }}"
+            migration_plan_name: "{{ migration_plan_name | default('None specified') }}"
+            restore_source_vm: "{{ restore_source_vm }}"
+            cleanup_resources: "{{ cleanup_resources }}"
+            vm_deleted: "{{ delete_vm_result.changed }}"
+            source_vm_restored: "{{ vm_restore.changed | default(false) }}"
+            rollback_successful: "{{ not rollback_verify.resources }}"
+            timestamp: "{{ ansible_date_time.iso8601 }}"
+        dest: "/tmp/rollback-report-{{ vm_name }}-{{ ansible_date_time.epoch }}.yml"
+        mode: '0644'
+
+    - name: Display rollback completion
+      debug:
+        msg: "Rollback completed for VM: {{ vm_name }}"
+
+    - name: Cleanup orphaned resources
+      include_tasks: ../rollback/cleanup-resources.yml
+      when: cleanup_resources

@@ -1,0 +1,187 @@
+---
+# Post-Migration Validation Playbook
+# This playbook performs post-migration validation and testing
+
+- name: VMware to OpenShift Post-Migration Validation
+  hosts: localhost
+  gather_facts: true
+  vars:
+    vm_name: "{{ lookup('env', 'VM_NAME') | default('web-server-01', true) }}"
+    target_namespace: "{{ lookup('env', 'TARGET_NAMESPACE') | default('production', true) }}"
+    app_type: "{{ lookup('env', 'APP_TYPE') | default('generic', true) }}"
+    skip_validation: false
+  
+  tasks:
+    - name: Display post-migration validation phase start
+      debug:
+        msg: "Starting post-migration validation for VM: {{ vm_name }}"
+
+    - name: Check if validation is enabled
+      set_fact:
+        run_validation: "{{ not skip_validation }}"
+
+    - name: Run post-migration validation if enabled
+      block:
+        - name: Execute post-migration validation script
+          script: ../validation/post-migration-validation.sh
+          environment:
+            VM_NAME: "{{ vm_name }}"
+            NAMESPACE: "{{ target_namespace }}"
+            APP_TYPE: "{{ app_type }}"
+          register: post_migration_result
+          failed_when: post_migration_result.rc != 0
+          ignore_errors: true
+        
+        - name: Display post-migration validation results
+          debug:
+            var: post_migration_result.stdout_lines
+          
+        - name: Save post-migration results to file
+          copy:
+            content: "{{ post_migration_result.stdout }}"
+            dest: "/tmp/post-migration-{{ vm_name }}-{{ ansible_date_time.epoch }}.log"
+            mode: '0644'
+      
+      when: run_validation
+
+    - name: Verify VM exists in OpenShift
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ target_namespace }}"
+      register: vm_check
+      until: vm_check.resources is defined
+      retries: 10
+      delay: 5
+
+    - name: Display VM existence check
+      debug:
+        msg: "VM exists: {{ 'Yes' if vm_check.resources else 'No' }}"
+
+    - name: Get VM status
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ target_namespace }}"
+      register: vm_status
+      when: vm_check.resources is defined
+
+    - name: Display VM status
+      debug:
+        msg: "VM Status: {{ vm_status.resources[0].status.printableStatus if vm_status.resources else 'Not available' }}"
+      when: vm_status.resources is defined
+
+    - name: Check if VMI is running
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ target_namespace }}"
+      register: vmi_check
+      ignore_errors: true
+
+    - name: Display VMI status
+      debug:
+        msg: "VMI Status: {{ 'Running' if vmi_check.resources else 'Not running' }}"
+
+    - name: Verify VM network interfaces
+      block:
+        - name: Get VM network interfaces
+          kubernetes.core.k8s_info:
+            api_version: kubevirt.io/v1
+            kind: VirtualMachineInstance
+            name: "{{ vm_name }}"
+            namespace: "{{ target_namespace }}"
+          register: vm_interfaces
+          when: vmi_check.resources is defined
+        
+        - name: Display network interfaces
+          debug:
+            msg: "{{ vm_interfaces.resources[0].status.interfaces if vm_interfaces.resources else 'No interfaces found' }}"
+          when: vm_interfaces.resources is defined
+      
+      when: vmi_check.resources is defined
+
+    - name: Verify PVCs are bound
+      block:
+        - name: Get VM PVCs
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: PersistentVolumeClaim
+            namespace: "{{ target_namespace }}"
+          register: vm_pvcs
+        
+        - name: Display PVC status
+          debug:
+            msg: "{{ item.metadata.name }}: {{ item.status.phase }}"
+          loop: "{{ vm_pvcs.resources }}"
+          when: vm_pvcs.resources is defined
+          loop_control:
+            label: "{{ item.metadata.name }}"
+      
+      when: vm_check.resources is defined
+
+    - name: Verify resource allocation
+      block:
+        - name: Get VM resource specifications
+          kubernetes.core.k8s_info:
+            api_version: kubevirt.io/v1
+            kind: VirtualMachine
+            name: "{{ vm_name }}"
+            namespace: "{{ target_namespace }}"
+          register: vm_resources
+          when: vm_check.resources is defined
+        
+        - name: Display resource allocation
+          debug:
+            msg:
+              - "CPU: {{ vm_resources.resources[0].spec.template.spec.domain.cpu.cores if vm_resources.resources else 'Not specified' }}"
+              - "Memory: {{ vm_resources.resources[0].spec.template.spec.domain.resources.requests.memory if vm_resources.resources else 'Not specified' }}"
+          when: vm_resources.resources is defined
+      
+      when: vm_check.resources is defined
+
+    - name: Run application-specific validation
+      block:
+        - name: Web server validation
+          debug:
+            msg: "Running web server validation checks"
+          when: app_type == "web-server"
+        
+        - name: Database server validation
+          debug:
+            msg: "Running database server validation checks"
+          when: app_type == "database"
+        
+        - name: Application server validation
+          debug:
+            msg: "Running application server validation checks"
+          when: app_type == "application"
+        
+        - name: Generic application validation
+          debug:
+            msg: "Running generic application validation checks"
+          when: app_type == "generic"
+      
+      when: run_validation
+
+    - name: Generate validation report
+      copy:
+        content: |
+          post_migration_validation_report:
+            vm_name: "{{ vm_name }}"
+            target_namespace: "{{ target_namespace }}"
+            app_type: "{{ app_type }}"
+            vm_exists: "{{ vm_check.resources is defined }}"
+            vm_status: "{{ vm_status.resources[0].status.printableStatus if vm_status.resources else 'Unknown' }}"
+            vmi_running: "{{ vmi_check.resources is defined }}"
+            validation_passed: "{{ post_migration_result.rc | default(0) == 0 if run_validation else true }}"
+            timestamp: "{{ ansible_date_time.iso8601 }}"
+        dest: "/tmp/post-migration-report-{{ vm_name }}-{{ ansible_date_time.epoch }}.yml"
+        mode: '0644'
+
+    - name: Display post-migration validation completion
+      debug:
+        msg: "Post-migration validation completed for VM: {{ vm_name }}"

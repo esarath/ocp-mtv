@@ -1,0 +1,31 @@
+---
+# VMware vCenter Variables
+vcenter:
+  host: "{{ vcenter_defaults.server }}"
+  username: "{{ vcenter_defaults.username }}"
+  password: "{{ vault_vcenter_password | default(omit) }}"
+  datacenter: "{{ vcenter_defaults.datacenter }}"
+  validate_certs: "{{ vcenter_defaults.validate_certs }}"
+  skip_tls_verify: "{{ vcenter_defaults.skip_tls_verify }}"
+  
+# VMware VM defaults
+vmware_vm_defaults:
+  power_state: "off"  # off for cold migration, on for warm migration
+  snapshot_cleanup: true
+  disk_consolidation: true
+  
+# VMware network defaults
+vmware_network_defaults:
+  vm_network: "VM Network"
+  network_adapter_type: "vmxnet3"
+  
+# VMware storage defaults
+vmware_storage_defaults:
+  default_datastore: "datastore-ssd"
+  storage_provisioning: "thin"
+  
+# VMware advanced settings
+vmware_advanced:
+  vddk_image: "quay.io/konveyor/forklift-vddk:latest"
+  conversion_timeout: 3600
+  disk_transfer_chunk_size_mb: 1

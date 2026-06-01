@@ -1,0 +1,159 @@
+name: Cold Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_name:
+        description: 'VM name to migrate'
+        required: true
+        default: 'web-server-01'
+      target_namespace:
+        description: 'Target namespace'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - development
+          - testing
+      network_mapping:
+        description: 'Network mapping (source:destination)'
+        required: true
+        default: 'VM Network:vlan-10-production'
+      storage_mapping:
+        description: 'Storage mapping (source:destination)'
+        required: true
+        default: 'datastore-ssd:storage-class-hdd'
+      skip_validation:
+        description: 'Skip pre/post validation'
+        required: false
+        default: 'false'
+        type: boolean
+      auto_rollback:
+        description: 'Enable automatic rollback on failure'
+        required: false
+        default: 'true'
+        type: boolean
+
+env:
+  MIGRATION_TYPE: 'cold'
+  ANSIBLE_FORCE_COLOR: 'true'
+
+jobs:
+  validate:
+    name: Pre-Migration Validation
+    runs-on: ubuntu-latest
+    if: github.event.inputs.skip_validation != 'true'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Set up Migration Environment
+        run: |
+          echo "VM_NAME=${{ github.event.inputs.vm_name }}" >> $GITHUB_ENV
+          echo "TARGET_NAMESPACE=${{ github.event.inputs.target_namespace }}" >> $GITHUB_ENV
+          echo "NETWORK_MAPPING=${{ github.event.inputs.network_mapping }}" >> $GITHUB_ENV
+          echo "STORAGE_MAPPING=${{ github.event.inputs.storage_mapping }}" >> $GITHUB_ENV
+      
+      - name: Run Pre-Flight Validation
+        run: |
+          chmod +x config/validation/pre-flight-check.sh
+          ./config/validation/pre-flight-check.sh --vm-name "$VM_NAME"
+
+  migrate:
+    name: Execute Cold Migration
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Set up Migration Environment
+        run: |
+          echo "VM_NAME=${{ github.event.inputs.vm_name }}" >> $GITHUB_ENV
+          echo "TARGET_NAMESPACE=${{ github.event.inputs.target_namespace }}" >> $GITHUB_ENV
+          echo "NETWORK_MAPPING=${{ github.event.inputs.network_mapping }}" >> $GITHUB_ENV
+          echo "STORAGE_MAPPING=${{ github.event.inputs.storage_mapping }}" >> $GITHUB_ENV
+      
+      - name: Execute Migration
+        run: |
+          cd config/ansible
+          ansible-playbook playbooks/cold-migration.yml \
+            -e "vm_name=$VM_NAME" \
+            -e "target_namespace=$TARGET_NAMESPACE" \
+            -e "network_mapping=$NETWORK_MAPPING" \
+            -e "storage_mapping=$STORAGE_MAPPING"
+        timeout-minutes: 120
+
+  validate-post:
+    name: Post-Migration Validation
+    runs-on: ubuntu-latest
+    needs: migrate
+    if: github.event.inputs.skip_validation != 'true'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Set up Migration Environment
+        run: |
+          echo "VM_NAME=${{ github.event.inputs.vm_name }}" >> $GITHUB_ENV
+          echo "TARGET_NAMESPACE=${{ github.event.inputs.target_namespace }}" >> $GITHUB_ENV
+      
+      - name: Run Post-Migration Validation
+        run: |
+          chmod +x config/validation/post-migration-validation.sh
+          ./config/validation/post-migration-validation.sh \
+            --vm-name "$VM_NAME" \
+            --namespace "$TARGET_NAMESPACE"
+
+  report:
+    name: Generate Migration Report
+    runs-on: ubuntu-latest
+    needs: [migrate, validate-post]
+    steps:
+      - name: Generate Report
+        run: |
+          cat > migration-report.txt << EOF
+Cold Migration Report
+====================
+Date: $(date)
+VM Name: ${{ github.event.inputs.vm_name }}
+Target Namespace: ${{ github.event.inputs.target_namespace }}
+Network Mapping: ${{ github.event.inputs.network_mapping }}
+Storage Mapping: ${{ github.event.inputs.storage_mapping }}
+Migration Type: ${{ env.MIGRATION_TYPE }}
+Workflow ID: ${{ github.run_id }}
+Workflow URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+Migration completed successfully.
+EOF
+          cat migration-report.txt
+      
+      - name: Upload Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: migration-report
+          path: migration-report.txt
+          retention-days: 30
+
+  rollback:
+    name: Automatic Rollback
+    runs-on: ubuntu-latest
+    needs: migrate
+    if: failure() && github.event.inputs.auto_rollback == 'true'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Set up Migration Environment
+        run: |
+          echo "VM_NAME=${{ github.event.inputs.vm_name }}" >> $GITHUB_ENV
+          echo "TARGET_NAMESPACE=${{ github.event.inputs.target_namespace }}" >> $GITHUB_ENV
+      
+      - name: Execute Rollback
+        run: |
+          cd config/ansible
+          ansible-playbook playbooks/rollback.yml \
+            -e "vm_name=$VM_NAME" \
+            -e "target_namespace=$TARGET_NAMESPACE" \
+            -e "restore_source_vm=true"

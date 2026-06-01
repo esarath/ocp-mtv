@@ -1,0 +1,84 @@
+apiVersion: fork.konveyor.io/v1beta1
+kind: Provider
+metadata:
+  name: openshift-provider
+  namespace: openshift-mtv
+  labels:
+    app: mtv
+    provider-type: openshift
+spec:
+  type: openshift
+  secret:
+    name: openshift-credentials
+    namespace: openshift-mtv
+  settings:
+    url: "https://api.openshift.example.com:6443"
+    skip_tls_verify: false
+---
+# Advanced OpenShift provider configuration
+apiVersion: fork.konveyor.io/v1beta1
+kind: Provider
+metadata:
+  name: openshift-provider-advanced
+  namespace: openshift-mtv
+  labels:
+    app: mtv
+    provider-type: openshift
+spec:
+  type: openshift
+  secret:
+    name: openshift-credentials
+    namespace: openshift-mtv
+  settings:
+    url: "https://api.openshift.example.com:6443"
+    skip_tls_verify: false
+    # Advanced settings
+    cacertificate: |
+      -----BEGIN CERTIFICATE-----
+      YOUR_OPENSHIFT_CA_CERTIFICATE
+      -----END CERTIFICATE-----
+---
+# OpenShift provider with resource limits
+apiVersion: fork.konveyor.io/v1beta1
+kind: Provider
+metadata:
+  name: openshift-provider-with-limits
+  namespace: openshift-mtv
+  labels:
+    app: mtv
+    provider-type: openshift
+spec:
+  type: openshift
+  secret:
+    name: openshift-credentials
+    namespace: openshift-mtv
+  settings:
+    url: "https://api.openshift.example.com:6443"
+    skip_tls_verify: false
+---
+# Conversion pod resource limits
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openshift-provider-config
+  namespace: openshift-mtv
+data:
+  resource_limits: |
+    cpu_limit: "4"
+    memory_limit: "8Gi"
+    cpu_request: "2"
+    memory_request: "4Gi"
+  timeout_settings: |
+    connection_timeout: "300"
+    operation_timeout: "1800"
+    vm_start_timeout: "3600"
+---
+# OpenShift Virtualization operator configuration
+apiVersion: operator.openshift.io/v1
+kind: HyperConverged
+metadata:
+  name: kubevirt-hyperconverged
+  namespace: openshift-cnv
+spec:
+  # OpenShift Virtualization configuration
+  # This should already be configured before MTV installation

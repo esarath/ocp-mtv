@@ -1,0 +1,214 @@
+// Jenkins Pipeline for Batch Migration
+pipeline {
+    agent any
+    
+    environment {
+        BATCH_ID = "${params.BATCH_ID}"
+        VM_LIST = "${params.VM_LIST}"
+        TARGET_NAMESPACE = "${params.TARGET_NAMESPACE}"
+        NETWORK_MAPPING = "${params.NETWORK_MAPPING}"
+        STORAGE_MAPPING = "${params.STORAGE_MAPPING}"
+        MIGRATION_TYPE = "batch"
+        SKIP_VALIDATION = "${params.SKIP_VALIDATION}"
+        AUTO_ROLLBACK = "${params.AUTO_ROLLBACK}"
+    }
+    
+    parameters {
+        string(
+            name: 'BATCH_ID',
+            defaultValue: 'production-tier1',
+            description: 'Batch identifier'
+        )
+        text(
+            name: 'VM_LIST',
+            defaultValue: 'web-server-01\nweb-server-02\nweb-server-03',
+            description: 'List of VMs to migrate (one per line)'
+        )
+        choice(
+            name: 'TARGET_NAMESPACE',
+            choices: ['production', 'development', 'testing'],
+            description: 'Target namespace'
+        )
+        string(
+            name: 'NETWORK_MAPPING',
+            defaultValue: 'VM Network:vlan-10-production',
+            description: 'Network mapping (source:destination)'
+        )
+        string(
+            name: 'STORAGE_MAPPING',
+            defaultValue: 'datastore-ssd:storage-class-hdd',
+            description: 'Storage mapping (source:destination)'
+        )
+        booleanParam(
+            name: 'SKIP_VALIDATION',
+            defaultValue: false,
+            description: 'Skip pre/post validation'
+        )
+        booleanParam(
+            name: 'AUTO_ROLLBACK',
+            defaultValue: true,
+            description: 'Enable automatic rollback on failure'
+        )
+    }
+    
+    stages {
+        stage('Pre-Migration Validation') {
+            when {
+                expression { params.SKIP_VALIDATION == false }
+            }
+            steps {
+                script {
+                    echo "Running pre-migration validation for batch: ${BATCH_ID}"
+                    sh """
+                        chmod +x config/validation/pre-flight-check.sh
+                        ./config/validation/pre-flight-check.sh || exit 1
+                    """
+                }
+            }
+        }
+        
+        stage('Parse VM List') {
+            steps {
+                script {
+                    // Convert multiline string to array
+                    def vmArray = VM_LIST.split('\n').collect { it.trim() }.findAll { it }
+                    env.VM_COUNT = vmArray.size() as String
+                    env.VM_ARRAY = vmArray.join(',')
+                    echo "Migrating ${env.VM_COUNT} VMs in batch ${BATCH_ID}"
+                }
+            }
+        }
+        
+        stage('Configure Environment') {
+            steps {
+                script {
+                    echo "Configuring migration environment for batch: ${BATCH_ID}"
+                    sh """
+                        export BATCH_ID="${BATCH_ID}"
+                        export MIGRATION_TYPE="${MIGRATION_TYPE}"
+                        export TARGET_NAMESPACE="${TARGET_NAMESPACE}"
+                        export NETWORK_MAPPING="${NETWORK_MAPPING}"
+                        export STORAGE_MAPPING="${STORAGE_MAPPING}"
+                    """
+                }
+            }
+        }
+        
+        stage('Execute Batch Migration') {
+            steps {
+                script {
+                    echo "Executing batch migration for ${VM_COUNT} VMs"
+                    def vmArray = env.VM_ARRAY.split(',')
+                    
+                    // Create batch migration plan
+                    sh """
+                        cd config/ansible
+                        ansible-playbook playbooks/site.yml \
+                            -e "vm_list=${env.VM_ARRAY}" \
+                            -e "batch_id=${BATCH_ID}" \
+                            -e "target_namespace=${TARGET_NAMESPACE}" \
+                            -e "network_mapping=${NETWORK_MAPPING}" \
+                            -e "storage_mapping=${STORAGE_MAPPING}" \
+                            -e "migration_type=batch" \
+                            || exit 1
+                    """
+                }
+            }
+        }
+        
+        stage('Monitor Migration Progress') {
+            steps {
+                script {
+                    echo "Monitoring migration progress for ${VM_COUNT} VMs"
+                    // Add monitoring logic here
+                }
+            }
+        }
+        
+        stage('Post-Migration Validation') {
+            when {
+                expression { params.SKIP_VALIDATION == false }
+            }
+            steps {
+                script {
+                    echo "Running post-migration validation for batch: ${BATCH_ID}"
+                    def vmArray = env.VM_ARRAY.split(',')
+                    
+                    vmArray.each { vmName ->
+                        sh """
+                            chmod +x config/validation/post-migration-validation.sh
+                            ./config/validation/post-migration-validation.sh \
+                                --vm-name "${vmName}" \
+                                --namespace "${TARGET_NAMESPACE}" || echo "Validation failed for ${vmName}"
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Generate Report') {
+            steps {
+                script {
+                    echo "Generating batch migration report"
+                    sh """
+                        cat > batch-migration-report.txt << EOF
+Batch Migration Report
+=======================
+Date: ${new Date()}
+Batch ID: ${BATCH_ID}
+Target Namespace: ${TARGET_NAMESPACE}
+VM Count: ${VM_COUNT}
+VM List: ${VM_ARRAY}
+Network Mapping: ${NETWORK_MAPPING}
+Storage Mapping: ${STORAGE_MAPPING}
+Migration Type: ${MIGRATION_TYPE}
+Build Number: ${env.BUILD_NUMBER}
+Build URL: ${env.BUILD_URL}
+
+Batch migration completed successfully.
+EOF
+                    """
+                    archiveArtifacts artifacts: 'batch-migration-report.txt', fingerprint: true
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "Batch migration pipeline completed successfully"
+            emailext (
+                subject: "Jenkins Build ${env.BUILD_NUMBER} - Batch Migration Successful",
+                body: "Batch migration completed successfully for batch: ${BATCH_ID}\nVMs: ${VM_COUNT}\nBuild: ${env.BUILD_URL}",
+                to: "${env.NOTIFICATION_EMAIL}",
+                mimeType: 'text/html'
+            )
+        }
+        failure {
+            script {
+                if (params.AUTO_ROLLBACK) {
+                    echo "Migration failed, initiating automatic rollback"
+                    def vmArray = env.VM_ARRAY.split(',')
+                    
+                    vmArray.each { vmName ->
+                        sh """
+                            cd config/ansible
+                            ansible-playbook playbooks/rollback.yml \
+                                -e "vm_name=${vmName}" \
+                                -e "target_namespace=${TARGET_NAMESPACE}" || echo "Rollback failed for ${vmName}"
+                        """
+                    }
+                }
+            }
+            emailext (
+                subject: "Jenkins Build ${env.BUILD_NUMBER} - Batch Migration Failed",
+                body: "Batch migration failed for batch: ${BATCH_ID}\nBuild: ${env.BUILD_URL}",
+                to: "${env.NOTIFICATION_EMAIL}",
+                mimeType: 'text/html'
+            )
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

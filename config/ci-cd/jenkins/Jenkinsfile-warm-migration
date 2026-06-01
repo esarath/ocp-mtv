@@ -1,0 +1,207 @@
+// Jenkins Pipeline for Warm Migration
+pipeline {
+    agent any
+    
+    environment {
+        VM_NAME = "${params.VM_NAME}"
+        TARGET_NAMESPACE = "${params.TARGET_NAMESPACE}"
+        NETWORK_MAPPING = "${params.NETWORK_MAPPING}"
+        STORAGE_MAPPING = "${params.STORAGE_MAPPING}"
+        CUTOVER_SECONDS = "${params.CUTOVER_SECONDS}"
+        SYNC_INTERVAL_SECONDS = "${params.SYNC_INTERVAL_SECONDS}"
+        MIGRATION_TYPE = "warm"
+        SKIP_VALIDATION = "${params.SKIP_VALIDATION}"
+        AUTO_ROLLBACK = "${params.AUTO_ROLLBACK}"
+    }
+    
+    parameters {
+        string(
+            name: 'VM_NAME',
+            defaultValue: 'database-server-01',
+            description: 'VM name to migrate'
+        )
+        choice(
+            name: 'TARGET_NAMESPACE',
+            choices: ['production', 'development', 'testing'],
+            description: 'Target namespace'
+        )
+        string(
+            name: 'NETWORK_MAPPING',
+            defaultValue: 'VM Network:vlan-10-production',
+            description: 'Network mapping (source:destination)'
+        )
+        string(
+            name: 'STORAGE_MAPPING',
+            defaultValue: 'datastore-ssd:storage-class-hdd',
+            description: 'Storage mapping (source:destination)'
+        )
+        string(
+            name: 'CUTOVER_SECONDS',
+            defaultValue: '300',
+            description: 'Cutover window in seconds'
+        )
+        string(
+            name: 'SYNC_INTERVAL_SECONDS',
+            defaultValue: '600',
+            description: 'Sync interval in seconds'
+        )
+        booleanParam(
+            name: 'SKIP_VALIDATION',
+            defaultValue: false,
+            description: 'Skip pre/post validation'
+        )
+        booleanParam(
+            name: 'AUTO_ROLLBACK',
+            defaultValue: true,
+            description: 'Enable automatic rollback on failure'
+        )
+    }
+    
+    stages {
+        stage('Pre-Migration Validation') {
+            when {
+                expression { params.SKIP_VALIDATION == false }
+            }
+            steps {
+                script {
+                    echo "Running pre-migration validation for VM: ${VM_NAME}"
+                    sh """
+                        chmod +x config/validation/pre-flight-check.sh
+                        ./config/validation/pre-flight-check.sh \
+                            --vm-name "${VM_NAME}" \
+                            || exit 1
+                    """
+                }
+            }
+        }
+        
+        stage('Configure Environment') {
+            steps {
+                script {
+                    echo "Configuring migration environment"
+                    sh """
+                        export VM_NAME="${VM_NAME}"
+                        export MIGRATION_TYPE="${MIGRATION_TYPE}"
+                        export TARGET_NAMESPACE="${TARGET_NAMESPACE}"
+                        export NETWORK_MAPPING="${NETWORK_MAPPING}"
+                        export STORAGE_MAPPING="${STORAGE_MAPPING}"
+                        export CUTOVER_SECONDS="${CUTOVER_SECONDS}"
+                        export SYNC_INTERVAL_SECONDS="${SYNC_INTERVAL_SECONDS}"
+                    """
+                }
+            }
+        }
+        
+        stage('Execute Warm Migration') {
+            steps {
+                script {
+                    echo "Executing warm migration for VM: ${VM_NAME}"
+                    echo "Cutover window: ${CUTOVER_SECONDS} seconds"
+                    echo "Sync interval: ${SYNC_INTERVAL_SECONDS} seconds"
+                    sh """
+                        cd config/ansible
+                        ansible-playbook playbooks/warm-migration.yml \
+                            -e "vm_name=${VM_NAME}" \
+                            -e "target_namespace=${TARGET_NAMESPACE}" \
+                            -e "network_mapping=${NETWORK_MAPPING}" \
+                            -e "storage_mapping=${STORAGE_MAPPING}" \
+                            -e "cutover_seconds=${CUTOVER_SECONDS}" \
+                            -e "sync_interval_seconds=${SYNC_INTERVAL_SECONDS}" \
+                            || exit 1
+                    """
+                }
+            }
+        }
+        
+        stage('Monitor Synchronization') {
+            steps {
+                script {
+                    echo "Monitoring synchronization phase"
+                    // Add monitoring logic here
+                }
+            }
+        }
+        
+        stage('Post-Migration Validation') {
+            when {
+                expression { params.SKIP_VALIDATION == false }
+            }
+            steps {
+                script {
+                    echo "Running post-migration validation for VM: ${VM_NAME}"
+                    sh """
+                        chmod +x config/validation/post-migration-validation.sh
+                        ./config/validation/post-migration-validation.sh \
+                            --vm-name "${VM_NAME}" \
+                            --namespace "${TARGET_NAMESPACE}" \
+                            --app-type "database" \
+                            || exit 1
+                    """
+                }
+            }
+        }
+        
+        stage('Generate Report') {
+            steps {
+                script {
+                    echo "Generating migration report"
+                    sh """
+                        cat > migration-report.txt << EOF
+Warm Migration Report
+====================
+Date: ${new Date()}
+VM Name: ${VM_NAME}
+Target Namespace: ${TARGET_NAMESPACE}
+Network Mapping: ${NETWORK_MAPPING}
+Storage Mapping: ${STORAGE_MAPPING}
+Cutover Seconds: ${CUTOVER_SECONDS}
+Sync Interval: ${SYNC_INTERVAL_SECONDS}
+Migration Type: ${MIGRATION_TYPE}
+Build Number: ${env.BUILD_NUMBER}
+Build URL: ${env.BUILD_URL}
+
+Migration completed successfully.
+EOF
+                    """
+                    archiveArtifacts artifacts: 'migration-report.txt', fingerprint: true
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "Warm migration pipeline completed successfully"
+            emailext (
+                subject: "Jenkins Build ${env.BUILD_NUMBER} - Warm Migration Successful",
+                body: "Warm migration completed successfully for VM: ${VM_NAME}\nBuild: ${env.BUILD_URL}",
+                to: "${env.NOTIFICATION_EMAIL}",
+                mimeType: 'text/html'
+            )
+        }
+        failure {
+            script {
+                if (params.AUTO_ROLLBACK) {
+                    echo "Migration failed, initiating automatic rollback"
+                    sh """
+                        cd config/ansible
+                        ansible-playbook playbooks/rollback.yml \
+                            -e "vm_name=${VM_NAME}" \
+                            -e "target_namespace=${TARGET_NAMESPACE}" \
+                            -e "restore_source_vm=true" \
+                            || echo "Rollback failed"
+                    """
+                }
+            }
+            emailext (
+                subject: "Jenkins Build ${env.BUILD_NUMBER} - Warm Migration Failed",
+                body: "Warm migration failed for VM: ${VM_NAME}\nBuild: ${env.BUILD_URL}",
+                to: "${env.NOTIFICATION_EMAIL}",
+                mimeType: 'text/html'
+            )
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

@@ -1,0 +1,71 @@
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: vm-disk-template
+  namespace: production
+spec:
+  source:
+    http:
+      url: ""
+  pvc:
+    accessModes:
+      - ReadWriteOnce
+    storageClassName: storage-class-hdd
+    resources:
+      requests:
+        storage: 50Gi
+---
+# DataVolume for warm migration with pre-allocation
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: vm-disk-template-warm
+  namespace: production
+spec:
+  source:
+    blank: {}
+  pvc:
+    accessModes:
+      - ReadWriteOnce
+    storageClassName: storage-class-hdd
+    resources:
+      requests:
+        storage: 50Gi
+---
+# DataVolume for block storage
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: vm-disk-template-block
+  namespace: production
+spec:
+  source:
+    http:
+      url: ""
+  pvc:
+    accessModes:
+      - ReadWriteOnce
+    volumeMode: Block
+    storageClassName: storage-class-ssd
+    resources:
+      requests:
+        storage: 100Gi
+---
+# DataVolume for filesystem storage
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: vm-disk-template-filesystem
+  namespace: production
+spec:
+  source:
+    http:
+      url: ""
+  pvc:
+    accessModes:
+      - ReadWriteOnce
+    volumeMode: Filesystem
+    storageClassName: storage-class-hdd
+    resources:
+      requests:
+        storage: 100Gi

@@ -1,0 +1,52 @@
+---
+# OpenShift Variables
+openshift:
+  api_url: "{{ openshift_defaults.api_url }}"
+  username: "{{ openshift_defaults.username }}"
+  password: "{{ vault_openshift_password | default(omit) }}"
+  mtv_namespace: "{{ openshift_defaults.mtv_namespace }}"
+  validate_certs: "{{ openshift_defaults.validate_certs }}"
+  token: "{{ vault_openshift_token | default(omit) }}"
+  
+# OpenShift provider settings
+openshift_provider:
+  name: "openshift-provider"
+  namespace: "{{ openshift.mtv_namespace }}"
+  
+# OpenShift Virtualization settings
+openshift_virtualization:
+  namespace: "openshift-cnv"
+  operator_name: "kubevirt-hyperconverged"
+  
+# Target namespace settings
+target_namespace:
+  name: "{{ target_namespace | default('production') }}"
+  create: true
+  resource_quotas:
+    enabled: true
+    cpu_limit: "64"
+    memory_limit: "128Gi"
+    storage_limit: "1Ti"
+    
+# OpenShift network settings
+openshift_networking:
+  network_attachment_definitions:
+    - name: "vlan-10-production"
+      namespace: "{{ openshift.mtv_namespace }}"
+    - name: "vlan-20-development"
+      namespace: "{{ openshift.mtv_namespace }}"
+    - name: "vlan-30-management"
+      namespace: "{{ openshift.mtv_namespace }}"
+      
+# OpenShift storage settings
+openshift_storage:
+  storage_classes:
+    - name: "storage-class-ssd"
+      provisioner: "csi.driver.example.com"
+      default: false
+    - name: "storage-class-hdd"
+      provisioner: "csi.driver.example.com"
+      default: true
+    - name: "storage-class-nfs"
+      provisioner: "nfs.csi.k8s.io"
+      default: false

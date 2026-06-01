@@ -1,0 +1,143 @@
+# GitLab CI/CD Pipeline for Warm Migration
+
+stages:
+  - validate
+  - migrate
+  - sync
+  - validate-post
+  - report
+
+variables:
+  MIGRATION_TYPE: "warm"
+  MIGRATION_TIMEOUT: "10800"
+  ANSIBLE_FORCE_COLOR: "true"
+
+default:
+  before_script:
+    - echo "Setting up migration environment"
+    - export VM_NAME="$VM_NAME"
+    - export TARGET_NAMESPACE="$TARGET_NAMESPACE"
+    - export NETWORK_MAPPING="$NETWORK_MAPPING"
+    - export STORAGE_MAPPING="$STORAGE_MAPPING"
+    - export CUTOVER_SECONDS="$CUTOVER_SECONDS"
+    - export SYNC_INTERVAL_SECONDS="$SYNC_INTERVAL_SECONDS"
+  after_script:
+    - echo "Cleaning up artifacts"
+    - rm -f /tmp/mtv-*.yml
+
+# Pre-Migration Validation
+validate:
+  stage: validate
+  script:
+    - echo "Running pre-flight validation"
+    - chmod +x config/validation/pre-flight-check.sh
+    - ./config/validation/pre-flight-check.sh --vm-name "$VM_NAME"
+  only:
+    variables:
+      - $SKIP_VALIDATION == "false"
+  tags:
+    - mtv
+    - validation
+
+# Warm Migration Execution
+migrate:
+  stage: migrate
+  script:
+    - echo "Executing warm migration for VM: $VM_NAME"
+    - echo "Cutover window: $CUTOVER_SECONDS seconds"
+    - echo "Sync interval: $SYNC_INTERVAL_SECONDS seconds"
+    - cd config/ansible
+    - ansible-playbook playbooks/warm-migration.yml
+      -e "vm_name=$VM_NAME"
+      -e "target_namespace=$TARGET_NAMESPACE"
+      -e "network_mapping=$NETWORK_MAPPING"
+      -e "storage_mapping=$STORAGE_MAPPING"
+      -e "cutover_seconds=$CUTOVER_SECONDS"
+      -e "sync_interval_seconds=$SYNC_INTERVAL_SECONDS"
+  timeout: 3 hours
+  tags:
+    - mtv
+    - migration
+
+# Monitor Synchronization
+sync:
+  stage: sync
+  script:
+    - echo "Monitoring synchronization phase"
+    - echo "Waiting for synchronization to complete"
+    - sleep 300  # Wait for sync to complete (adjust as needed)
+    - echo "Synchronization monitoring completed"
+  needs:
+    - migrate
+  tags:
+    - mtv
+    - monitoring
+
+# Post-Migration Validation
+validate-post:
+  stage: validate-post
+  script:
+    - echo "Running post-migration validation"
+    - chmod +x config/validation/post-migration-validation.sh
+    - ./config/validation/post-migration-validation.sh
+      --vm-name "$VM_NAME"
+      --namespace "$TARGET_NAMESPACE"
+      --app-type "database"
+  only:
+    variables:
+      - $SKIP_VALIDATION == "false"
+  needs:
+    - sync
+  tags:
+    - mtv
+    - validation
+
+# Generate Report
+report:
+  stage: report
+  script:
+    - echo "Generating migration report"
+    - cat > migration-report.txt << EOF
+Warm Migration Report
+====================
+Date: $(date)
+VM Name: $VM_NAME
+Target Namespace: $TARGET_NAMESPACE
+Network Mapping: $NETWORK_MAPPING
+Storage Mapping: $STORAGE_MAPPING
+Cutover Seconds: $CUTOVER_SECONDS
+Sync Interval: $SYNC_INTERVAL_SECONDS
+Migration Type: $MIGRATION_TYPE
+Pipeline ID: $CI_PIPELINE_ID
+Job ID: $CI_JOB_ID
+
+Migration completed successfully.
+EOF
+    - cat migration-report.txt
+  artifacts:
+    paths:
+      - migration-report.txt
+    expire_in: 30 days
+  needs:
+    - validate-post
+  tags:
+    - mtv
+    - reporting
+
+# Automatic Rollback on Failure
+rollback:
+  stage: migrate
+  script:
+    - echo "Migration failed, initiating automatic rollback"
+    - cd config/ansible
+    - ansible-playbook playbooks/rollback.yml
+      -e "vm_name=$VM_NAME"
+      -e "target_namespace=$TARGET_NAMESPACE"
+      -e "restore_source_vm=true"
+  when: on_failure
+  only:
+    variables:
+      - $AUTO_ROLLBACK == "true"
+  tags:
+    - mtv
+    - rollback

@@ -1,0 +1,119 @@
+# GitLab CI/CD Pipeline for Cold Migration
+
+stages:
+  - validate
+  - migrate
+  - validate-post
+  - report
+
+variables:
+  MIGRATION_TYPE: "cold"
+  MIGRATION_TIMEOUT: "7200"
+  ANSIBLE_FORCE_COLOR: "true"
+
+default:
+  before_script:
+    - echo "Setting up migration environment"
+    - export VM_NAME="$VM_NAME"
+    - export TARGET_NAMESPACE="$TARGET_NAMESPACE"
+    - export NETWORK_MAPPING="$NETWORK_MAPPING"
+    - export STORAGE_MAPPING="$STORAGE_MAPPING"
+  after_script:
+    - echo "Cleaning up artifacts"
+    - rm -f /tmp/mtv-*.yml
+
+# Pre-Migration Validation
+validate:
+  stage: validate
+  script:
+    - echo "Running pre-flight validation"
+    - chmod +x config/validation/pre-flight-check.sh
+    - ./config/validation/pre-flight-check.sh --vm-name "$VM_NAME"
+  only:
+    variables:
+      - $SKIP_VALIDATION == "false"
+  tags:
+    - mtv
+    - validation
+
+# Cold Migration Execution
+migrate:
+  stage: migrate
+  script:
+    - echo "Executing cold migration for VM: $VM_NAME"
+    - cd config/ansible
+    - ansible-playbook playbooks/cold-migration.yml
+      -e "vm_name=$VM_NAME"
+      -e "target_namespace=$TARGET_NAMESPACE"
+      -e "network_mapping=$NETWORK_MAPPING"
+      -e "storage_mapping=$STORAGE_MAPPING"
+  timeout: 2 hours
+  tags:
+    - mtv
+    - migration
+
+# Post-Migration Validation
+validate-post:
+  stage: validate-post
+  script:
+    - echo "Running post-migration validation"
+    - chmod +x config/validation/post-migration-validation.sh
+    - ./config/validation/post-migration-validation.sh
+      --vm-name "$VM_NAME"
+      --namespace "$TARGET_NAMESPACE"
+  only:
+    variables:
+      - $SKIP_VALIDATION == "false"
+  needs:
+    - migrate
+  tags:
+    - mtv
+    - validation
+
+# Generate Report
+report:
+  stage: report
+  script:
+    - echo "Generating migration report"
+    - cat > migration-report.txt << EOF
+Cold Migration Report
+====================
+Date: $(date)
+VM Name: $VM_NAME
+Target Namespace: $TARGET_NAMESPACE
+Network Mapping: $NETWORK_MAPPING
+Storage Mapping: $STORAGE_MAPPING
+Migration Type: $MIGRATION_TYPE
+Pipeline ID: $CI_PIPELINE_ID
+Job ID: $CI_JOB_ID
+
+Migration completed successfully.
+EOF
+    - cat migration-report.txt
+  artifacts:
+    paths:
+      - migration-report.txt
+    expire_in: 30 days
+  needs:
+    - validate-post
+  tags:
+    - mtv
+    - reporting
+
+# Automatic Rollback on Failure
+rollback:
+  stage: migrate
+  script:
+    - echo "Migration failed, initiating automatic rollback"
+    - cd config/ansible
+    - ansible-playbook playbooks/rollback.yml
+      -e "vm_name=$VM_NAME"
+      -e "target_namespace=$TARGET_NAMESPACE"
+      -e "restore_source_vm=true"
+  when: on_failure
+  only:
+    variables:
+      - $AUTO_ROLLBACK == "true"
+  tags:
+    - mtv
+    - rollback

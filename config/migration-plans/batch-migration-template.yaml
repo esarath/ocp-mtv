@@ -1,0 +1,43 @@
+apiVersion: fork.konveyor.io/v1beta1
+kind: MigrationPlan
+metadata:
+  name: batch-migration-template
+  namespace: openshift-mtv
+  labels:
+    app: mtv
+    migration-type: batch
+  annotations:
+    description: "Batch migration template - customize before use"
+spec:
+  provider_sources:
+    - name: vsphere-provider
+      namespace: openshift-mtv
+  provider_destinations:
+    - name: openshift-provider
+      namespace: openshift-mtv
+  migrations:
+    - vm:
+        id: "vm-12345"  # Replace with first VM ID
+        name: "vm-name-1"  # Replace with first VM name
+        category: "web-server"
+      target_namespace: "production"
+      target_vm_name: "vm-name-1"
+      network_mappings:
+        - source: "VM Network"
+          destination: "vlan-10-production"
+      storage_mappings:
+        - source: "datastore-ssd"
+          destination: "storage-class-hdd"
+    - vm:
+        id: "vm-67890"  # Replace with second VM ID
+        name: "vm-name-2"  # Replace with second VM name
+        category: "web-server"
+      target_namespace: "production"
+      target_vm_name: "vm-name-2"
+      network_mappings:
+        - source: "VM Network"
+          destination: "vlan-10-production"
+      storage_mappings:
+        - source: "datastore-ssd"
+          destination: "storage-class-hdd"
+  warm_migration: false

@@ -1,0 +1,29 @@
+apiVersion: k8s.cni.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: bridge-ovs
+  namespace: openshift-mtv
+  annotations:
+    k8s.v1.cni.cncf.io/resourceName: bridge.network.kubevirt.io/ovs-br0
+spec:
+  config: '{
+    "cniVersion": "0.3.1",
+    "name": "bridge-ovs",
+    "type": "ovs",
+    "bridge": "ovs-br0",
+    "ipam": {
+      "type": "host-local",
+      "subnet": "10.128.0.0/16",
+      "rangeStart": "10.128.0.100",
+      "rangeEnd": "10.128.0.200",
+      "gateway": "10.128.0.1",
+      "routes": [
+        {
+          "dst": "0.0.0.0/0"
+        }
+      ]
+    },
+    "mtu": 1500,
+    "isGateway": false,
+    "hairpinMode": false
+  }'
