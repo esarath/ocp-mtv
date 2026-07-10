@@ -8,7 +8,7 @@ Based on validated state from [`11-pre-ESXi-OCP-Live-cluster-validation-checklis
 - Networking decision: **pod network** (no NAD — see Section 3 of the validation checklist)
 - Storage: `nfs-storage` (default) or `mtv-storage`
 
-**Progress tracker:** Step 1–2 (console/provider checks) → walk through in console. Step 3 (NetworkMap) → ✅ already created via CLI, see below. Step 4 onward → pending, follow via web console.
+**Progress tracker:** Step 1–2 (console/provider checks) → walk through in console. Step 3 (NetworkMap) → ✅ done. Step 4 (StorageMap) → ✅ done. Step 5 onward → pending, follow via web console.
 
 ---
 
@@ -83,7 +83,9 @@ spec:
 
 ---
 
-## Step 4 — Create a Storage Map
+## Step 4 — Create a Storage Map ✅ DONE
+
+**Status: Completed via CLI on 2026-07-10.** You can view it as-is in the console, or use these console steps to recreate/verify:
 
 1. Left nav → **Migration** → **StorageMaps for virtualization** → **Create StorageMap**.
 2. Name: `esxi-to-ocp-storage`
@@ -92,6 +94,45 @@ spec:
 5. Map the source datastore (`datastore-1`) to a target StorageClass:
    - Use **`nfs-storage`** (cluster default) unless you specifically want `mtv-storage`.
 6. Save.
+
+**Result (verify in console under Migration → StorageMaps for virtualization):**
+
+| Field | Value |
+|---|---|
+| Name | `esxi-to-ocp-storage` |
+| Namespace | `openshift-mtv` |
+| Source provider | `esxi-lab` |
+| Destination provider | `host` |
+| Mapping | `datastore-1` (vsphere) → StorageClass `nfs-storage`, access mode `ReadWriteOnce` |
+| Status | `Ready = True` — "The storage map is ready." |
+
+**YAML applied:**
+```yaml
+apiVersion: forklift.konveyor.io/v1beta1
+kind: StorageMap
+metadata:
+  name: esxi-to-ocp-storage
+  namespace: openshift-mtv
+spec:
+  provider:
+    source:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: Provider
+      name: esxi-lab
+      namespace: openshift-mtv
+    destination:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: Provider
+      name: host
+      namespace: openshift-mtv
+  map:
+    - source:
+        name: "datastore-1"
+        type: vsphere
+      destination:
+        storageClass: nfs-storage
+        accessMode: ReadWriteOnce
+```
 
 ---
 
