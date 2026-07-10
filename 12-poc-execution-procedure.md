@@ -214,6 +214,29 @@ spec:
 
 ---
 
+### Issues & Fixes During Migration Execution
+
+The migration required **6 attempts** before succeeding. Each failure and fix is recorded here in order for future reference/troubleshooting.
+
+| Attempt | Result | Root Cause | Fix Applied |
+|---|---|---|---|
+| **Pre-migration** | Snapshot taken for rollback (`pre-migration-snapshot`) before powering off `rhel96` | N/A — precautionary step | N/A |
+| **run1** | ❌ Failed at `ConvertGuest` | `virt-v2v` builds an `esx://root@ESXi8.ocp.local` libvirt URI using the ESXi host's **self-reported hostname** (from `esxcli system hostname get`), not the IP used in the Provider config. This hostname had no DNS record reachable from the OCP pod network. Error: `IP address lookup for host 'ESXi8.ocp.local' failed: Name or service not known` | Identified the bastion (`192.168.29.10`) runs BIND (`named`) for zone `ocp.local` (`/var/named/ocp.local.zone`). Added an A record: `ESXi8 IN A 192.168.29.60`, bumped the SOA serial, ran `rndc reload ocp.local`. Verified resolution both on the bastion (`dig`) and from inside the cluster pod network (`getent hosts` in a test pod). |
+| **run2** | ❌ Failed at `ConvertGuest` | New error: `server does not support 'range' (byte range) requests` when `nbdkit`'s `curl` plugin read the VMDK over HTTPS from ESXi. Initially suspected the `pre-migration-snapshot` (reading a delta disk) as the cause. | Removed the snapshot (`vim-cmd vmsvc/snapshot.removeall`), flattening the disk back to base `rhel10.vmdk`. |
+| **run3** | ❌ Failed — **same exact error** | Snapshot removal did not fix it — confirmed the snapshot was a **red herring**. Real cause: the `esxi-lab` Provider had **no VDDK init image configured** (`spec.settings` only had `sdkEndpoint: esxi`). Without VDDK, Forklift falls back to the HTTPS/NFC transport via `nbdkit-curl`, which doesn't support byte-range reads against this ESXi host's HTTP server — a known incompatibility. | Retrieved user-downloaded VDDK tarball (`VMware-vix-disklib-9.1.0.0.25379531.x86_64.tar.gz`, from Broadcom support portal) from host `tiny1` (192.168.29.2). Built a VDDK init container image on the OCP bastion using `podman` with the standard Red Hat MTV Dockerfile pattern (`FROM ubi8/ubi:8.6`, `COPY vmware-vix-disklib-distrib`, `ENTRYPOINT ["cp","-r",...,"/opt"]`). Pushed to OCP's internal registry (`openshift-mtv/vddk:9.1.0`). Patched provider: `spec.settings.vddkInitImage`. Granted cross-namespace image-pull RBAC (`system:image-puller` role bound to `system:serviceaccounts:rhel96-vms` in `openshift-mtv`). |
+| **run4** | ❌ Failed at `ConvertGuest` | VDDK now loading, but new error: `libvixDiskLib.so.8: cannot open shared object file`. VDDK 9.1.0 only ships `libvixDiskLib.so.9`; this MTV version's `virt-v2v`/`nbdkit-vddk` plugin expects the older `.so.8` SONAME. | Added a compatibility symlink in the image: `ln -sf libvixDiskLib.so.9.1.0.0 libvixDiskLib.so.8`. First attempt used an **absolute path** for the symlink target — wrong, see run5. |
+| **run5** | ❌ Failed — **same `.so.8` error persisted** | The absolute-path symlink (`/vmware-vix-disklib-distrib/lib64/...`) broke because the init container's `ENTRYPOINT` copies the whole directory to `/opt/vmware-vix-disklib-distrib` at runtime — the symlink kept pointing to the original (non-existent, in the shared volume) absolute path instead of resolving relative to its new location. | Rebuilt the image with a **relative** symlink (`cd lib64 && ln -sf libvixDiskLib.so.9.1.0.0 libvixDiskLib.so.8`), matching the pattern VMware's own `.so`/`.so.9` symlinks already used. Verified directly with `podman run --entrypoint sh ... ls -la lib64/` before pushing. Pushed as `vddk:9.1.0-compat8v2`, re-patched provider. |
+| **run6** | ✅ **SUCCEEDED** | — | Full pipeline completed: `Initialize` → `DiskAllocation` (16384 MB) → `ImageConversion` → `DiskTransferV2v` (16384/16384 MB transferred) → `VirtualMachineCreation`. Migration condition: `"The migration has SUCCEEDED."` VM object `rhel96` created in `rhel96-vms` namespace (`Stopped` initially, as expected for cold migration). Started via `virtctl start rhel96 -n rhel96-vms` → `Running`, `Ready: True`. Guest agent confirmed live: `guestOSInfo` reported RHEL 9.6, kernel `5.14.0-570.12.1.el9_6.x86_64` — UEFI/Secure Boot boot path succeeded with no issues. |
+
+**Key lessons for future ESXi(standalone)-to-OCP MTV migrations:**
+1. **DNS matters even for IP-based provider URLs** — Forklift/`virt-v2v` may still resolve the ESXi host's own reported hostname internally; ensure it's resolvable from the OCP pod network, not just the Provider's configured URL.
+2. **VDDK is effectively required** for standalone ESXi sources (no vCenter) — the non-VDDK HTTPS fallback transport is unreliable (byte-range support issues observed here).
+3. **VDDK version vs. MTV compatibility**: MTV 2.7.12's `virt-v2v` expects VDDK's `.so.8` SONAME; only VDDK 9.1.0 (`.so.9`) was available at migration time. A relative symlink workaround was needed — **use a relative symlink**, not absolute, since the VDDK init container's contents get copied to a different path (`/opt/...`) at runtime via its `ENTRYPOINT`.
+4. **Snapshots are not the real blocker for cold migration** in this environment — don't assume a checklist item (like "no snapshots") is the root cause without confirming after the fix; this cost one full retry cycle here.
+5. **Unresolved at end of session**: the migrated VM's guest network config was still using its old ESXi static-IP setup; `status.interfaces` on the VMI had no IP populated even ~15 minutes after boot. Needs a console login to check/fix (`nmcli`/`ip` inside the guest) — likely needs to switch to DHCP for the pod-network masquerade binding to assign an address, or set a new static IP in the correct subnet.
+
+---
+
 ## Step 6 — Validate the Plan
 
 1. Open the created plan → check the **Status** column shows `Ready` (green), not `Warning`/`Critical`.
