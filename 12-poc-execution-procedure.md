@@ -8,6 +8,8 @@ Based on validated state from [`11-pre-ESXi-OCP-Live-cluster-validation-checklis
 - Networking decision: **pod network** (no NAD — see Section 3 of the validation checklist)
 - Storage: `nfs-storage` (default) or `mtv-storage`
 
+**Progress tracker:** Step 1–2 (console/provider checks) → walk through in console. Step 3 (NetworkMap) → ✅ already created via CLI, see below. Step 4 onward → pending, follow via web console.
+
 ---
 
 ## Step 1 — Log in to the OCP Web Console
@@ -30,7 +32,9 @@ If either provider shows anything other than `Ready`, stop and re-check — do n
 
 ---
 
-## Step 3 — Create a Network Map
+## Step 3 — Create a Network Map ✅ DONE
+
+**Status: Completed via CLI on 2026-07-10.** You can view it as-is in the console, or use these console steps to recreate/verify:
 
 1. Left nav → **Migration** → **NetworkMaps for virtualization** → **Create NetworkMap**.
 2. Name: `esxi-to-ocp-podnetwork`
@@ -38,6 +42,44 @@ If either provider shows anything other than `Ready`, stop and re-check — do n
 4. Target provider: `host`
 5. Map the source network (`VM Network`) to target: select **Pod Networking** (this is the decision recorded in the checklist — no NAD/Multus binding is used, since worker nodes have no spare NIC for a dedicated bridge).
 6. Save.
+
+**Result (verify in console under Migration → NetworkMaps for virtualization):**
+
+| Field | Value |
+|---|---|
+| Name | `esxi-to-ocp-podnetwork` |
+| Namespace | `openshift-mtv` |
+| Source provider | `esxi-lab` |
+| Destination provider | `host` |
+| Mapping | `"VM Network"` (vsphere) → **Pod Networking** |
+| Status | `Ready = True` — "The network map is ready." |
+
+**YAML applied:**
+```yaml
+apiVersion: forklift.konveyor.io/v1beta1
+kind: NetworkMap
+metadata:
+  name: esxi-to-ocp-podnetwork
+  namespace: openshift-mtv
+spec:
+  provider:
+    source:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: Provider
+      name: esxi-lab
+      namespace: openshift-mtv
+    destination:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: Provider
+      name: host
+      namespace: openshift-mtv
+  map:
+    - source:
+        name: "VM Network"
+        type: vsphere
+      destination:
+        type: pod
+```
 
 ---
 
