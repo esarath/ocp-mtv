@@ -8,7 +8,7 @@ Based on validated state from [`11-pre-ESXi-OCP-Live-cluster-validation-checklis
 - Networking decision: **pod network** (no NAD — see Section 3 of the validation checklist)
 - Storage: `nfs-storage` (default) or `mtv-storage`
 
-**Progress tracker:** Step 1–2 (console/provider checks) → walk through in console. Step 3 (NetworkMap) → ✅ done. Step 4 (StorageMap) → ✅ done. Step 5 onward → pending, follow via web console.
+**Progress tracker:** Step 1–2 (console/provider checks) → walk through in console. Step 3 (NetworkMap) → ✅ done. Step 4 (StorageMap) → ✅ done. Step 5 (Plan) → ✅ created, not yet started. Step 6 onward → pending, follow via web console.
 
 ---
 
@@ -136,7 +136,11 @@ spec:
 
 ---
 
-## Step 5 — Create the Migration Plan
+## Step 5 — Create the Migration Plan ✅ DONE (not yet started)
+
+**Status: Plan created via CLI on 2026-07-10. Status = `Ready: True`. Migration has NOT been started yet — Steps 6–8 are still pending.**
+
+Console steps to recreate/verify:
 
 1. Left nav → **Migration** → **Plans for virtualization** → **Create Plan**.
 2. Name: `rhel96-migration-poc`
@@ -150,7 +154,63 @@ spec:
 10. Review the **VM firmware/preferences** on the plan's VM details page:
     - Confirm **UEFI** is selected as firmware type.
     - Confirm **Secure Boot** is enabled to match the source (`uefi.secureBoot.enabled = TRUE` on ESXi).
+    - **Not yet verified — do this in the console before starting the plan.**
 11. Save the plan (do **not** start it yet).
+
+**Result (verify in console under Migration → Plans for virtualization):**
+
+| Field | Value |
+|---|---|
+| Name | `rhel96-migration-poc` |
+| Namespace | `openshift-mtv` |
+| Source provider | `esxi-lab` |
+| Destination provider | `host` |
+| Target namespace | `rhel96-vms` (newly created) |
+| Network map | `esxi-to-ocp-podnetwork` |
+| Storage map | `esxi-to-ocp-storage` |
+| Migration type | Cold (`warm: false`) |
+| VM(s) | `rhel96` |
+| Status | `Ready = True` — "The migration plan is ready." |
+| Executed? | **No — not started.** `.status.migration.vms` is empty. |
+
+**YAML applied:**
+```yaml
+apiVersion: forklift.konveyor.io/v1beta1
+kind: Plan
+metadata:
+  name: rhel96-migration-poc
+  namespace: openshift-mtv
+spec:
+  description: "POC cold migration of rhel96 from standalone ESXi8 to OCP via MTV"
+  provider:
+    source:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: Provider
+      name: esxi-lab
+      namespace: openshift-mtv
+    destination:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: Provider
+      name: host
+      namespace: openshift-mtv
+  targetNamespace: rhel96-vms
+  warm: false
+  map:
+    network:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: NetworkMap
+      name: esxi-to-ocp-podnetwork
+      namespace: openshift-mtv
+    storage:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: StorageMap
+      name: esxi-to-ocp-storage
+      namespace: openshift-mtv
+  vms:
+    - name: rhel96
+```
+
+**Note:** Target namespace `rhel96-vms` did not exist and was created (`oc create namespace rhel96-vms`) before applying the plan.
 
 ---
 
