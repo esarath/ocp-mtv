@@ -280,7 +280,124 @@ Two checks confirm a genuinely successful migration, not just object creation:
 - **`AgentConnected=True`** in `status.conditions` — the in-guest qemu-guest-agent checked in over virtio-serial, meaning the guest OS actually booted and its service stack came up.
 - **MAC address in `status.interfaces[0].mac`** matches the original ESXi vNIC's MAC (VMware OUI prefix `00:0c:29:...`) — confirms this is the migrated disk/identity, not a coincidentally-booting fresh VM.
 
-Open the VM's console (`virtctl console <vm-name> -n <target-namespace>`, or the web console's Console tab) to visually confirm the boot completed, check `df -h`/`journalctl -xe` for boot errors, and specifically walk the UEFI/Secure Boot path if the source VM used it. Since pod network is in use, expect a **new cluster IP**, not the VM's old ESXi static IP — see Known Issue #10, this is currently a manual follow-up step, not automated.
+Open the VM's console (`virtctl console <vm-name> -n <target-namespace>`, or the web console's Console tab) to visually confirm the boot completed, check `df -h`/`journalctl -xe` for boot errors, and specifically walk the UEFI/Secure Boot path if the source VM used it. Since pod network is in use, expect a **new cluster IP**, not the VM's old ESXi static IP.
+
+**If `status.interfaces` shows no `ipAddress` even a few minutes after boot** (despite `AgentConnected=True`), the guest's network config almost certainly still points at the old hypervisor's NIC device name — this was hit on every VM migrated so far in this lab and is now a known, fixable step. See Step 12.
+
+---
+
+## Step 12 — Fix stale guest networking (no IP after boot)
+
+**Symptom:** `AgentConnected=True` (guest OS booted fine) but `oc get vmi <vm-name> -o jsonpath='{.status.interfaces}'` has no `ipAddress` field.
+
+**Root cause:** `virt-v2v` converts the disk/boot config for the new hypervisor (BIOS/UEFI, drivers, bootloader) but does **not** reliably rewrite the guest's NetworkManager connection profile to match the new NIC. The source VM's profile stays bound to its *old* device name (e.g. ESXi's `vmxnet3` shows up in-guest as `ens34`) with the *old* static IP from the source LAN subnet:
+```ini
+[connection]
+interface-name=ens34
+[ipv4]
+address1=192.168.29.61/24
+method=manual
+```
+On the target, the NIC is virtio and gets a new predictable name (`enp1s0` in this lab's `pc-q35` machine type). NetworkManager has no profile matching `enp1s0`, so the interface never activates — no DHCP attempt, no IP, nothing. Even if the name happened to match, the old static IP is meaningless on the pod network's masquerade subnet.
+
+**Fix — edit the guest's NetworkManager config offline, before or after first boot:**
+
+1. **Stop the VM and free the PVC** (offline disk tools need exclusive access — this PVC is `ReadWriteOnce`):
+   ```bash
+   oc patch vm <vm-name> -n <target-namespace> --type=merge -p '{"spec":{"running":false}}'
+   # wait for the VMI to disappear (oc get vmi <vm-name> -n <target-namespace>)
+   oc delete pod <finished-transfer-pod> -n <target-namespace> --ignore-not-found   # it still references the PVC even Completed
+   ```
+
+2. **Don't use `virtctl guestfs` for scripted/non-interactive work** — it creates its libguestfs pod tied to the CLI process's own lifetime and tears the pod down the moment that process exits or detaches, which happens immediately in a non-interactive/backgrounded shell. Create the pod yourself instead, mirroring what `virtctl guestfs` would create:
+   ```yaml
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: guestfs-manual
+     namespace: <target-namespace>
+   spec:
+     restartPolicy: Never
+     containers:
+     - name: libguestfs
+       image: registry.redhat.io/container-native-virtualization/libguestfs-tools-rhel9@sha256:a51dc6303e491de47533fc0a25ac5165cd8027b91fc884b80d540843e8ea2448
+       command: ["sleep", "3600"]
+       securityContext:
+         runAsUser: 0
+         privileged: true
+       volumeMounts:
+       - name: disk
+         mountPath: /disk
+     volumes:
+     - name: disk
+       persistentVolumeClaim:
+         claimName: <the-vm's-pvc-name>
+   ```
+   ```bash
+   oc apply -f guestfs-pod.yaml
+   oc wait --for=condition=Ready pod/guestfs-manual -n <target-namespace> --timeout=60s
+   ```
+
+3. **Image env-var gotcha**: this image sets `LIBGUESTFS_DIR` in its baked-in environment, but libguestfs itself reads `LIBGUESTFS_PATH` — that mismatch means the prebuilt appliance at `/usr/local/lib/guestfs/appliance` is never found by default, and `virt-customize`/`virt-copy-in` fail with `cannot find any suitable libguestfs supermin, fixed or old-style appliance`. Also skip the libvirt backend (its socket isn't running in this pod) in favor of the direct/KVM backend. Export both explicitly on every invocation:
+   ```bash
+   export LIBGUESTFS_BACKEND=direct
+   export LIBGUESTFS_PATH=/usr/local/lib/guestfs/appliance
+   ```
+
+4. **Write the corrected connection profile and apply it in one `virt-customize` call** (doing it as separate `virt-copy-in`/`virt-customize` invocations was observed to leave the appliance in a bad state — `mount: /sysroot: ... already mounted` — on the second call; one combined invocation avoids this):
+   ```bash
+   oc exec -n <target-namespace> guestfs-manual -- sh -c '
+     export LIBGUESTFS_BACKEND=direct
+     export LIBGUESTFS_PATH=/usr/local/lib/guestfs/appliance
+     UUID=$(cat /proc/sys/kernel/random/uuid)
+     cat > /tmp/enp1s0.nmconnection << EOF
+   [connection]
+   id=enp1s0
+   uuid=$UUID
+   type=ethernet
+   interface-name=enp1s0
+
+   [ethernet]
+
+   [ipv4]
+   method=auto
+
+   [ipv6]
+   addr-gen-mode=eui64
+   method=auto
+
+   [proxy]
+   EOF
+     chmod 600 /tmp/enp1s0.nmconnection
+     virt-customize -a /disk/disk.img \
+       --upload /tmp/enp1s0.nmconnection:/etc/NetworkManager/system-connections/enp1s0.nmconnection \
+       --delete /etc/NetworkManager/system-connections/<old-profile>.nmconnection \
+       --chmod 0600:/etc/NetworkManager/system-connections/enp1s0.nmconnection \
+       --selinux-relabel
+   '
+   ```
+   `method=auto` (DHCP) is required, not optional — KubeVirt's masquerade pod-network binding runs its own small DHCP server inside `virt-launcher` and NATs traffic through it; a static IP from the old LAN subnet will never be reachable there. Find the actual interface name to bind to (`enp1s0` here) from `oc get vmi <vm-name> -o jsonpath='{.status.interfaces}'` on a *previous* boot attempt, or from `virt-inspector -a /disk/disk.img` if the VM has never booted on KubeVirt yet.
+
+5. **Clean up and boot:**
+   ```bash
+   oc delete pod guestfs-manual -n <target-namespace>
+   oc patch vm <vm-name> -n <target-namespace> --type=merge -p '{"spec":{"running":true}}'
+   ```
+
+6. **Verify from both sides** — domain-level (DHCP lease) and guest-agent (in-OS confirmation) should both report the same address within seconds of boot:
+   ```bash
+   oc get vmi <vm-name> -n <target-namespace> -o jsonpath='{.status.interfaces}' | python3 -m json.tool
+   # expect: "infoSource": "domain, guest-agent", "ipAddress": "<pod-network-ip>"
+   ```
+   Then confirm actual reachability, not just an assigned address, from a throwaway pod in the cluster:
+   ```bash
+   oc run pingtest --image=registry.access.redhat.com/ubi9/ubi-minimal --rm -it --restart=Never -n <target-namespace> \
+     -- bash -c "timeout 3 bash -c 'echo > /dev/tcp/<vm-ip>/22' && echo TCP22_OPEN"
+   ```
+
+**Result in this lab:** `rhel96` went from no IP at all to `10.128.2.91` (pod-network), confirmed by both `domain` and `guest-agent` info sources, with SSH port 22 confirmed reachable from inside the cluster.
+
+**Storage note surfaced by this fix:** both `mtv-storage` and `nfs-storage` StorageClasses in this cluster are ultimately NFS-backed (`mount` inside the guestfs pod showed the PVC as an NFS4 mount of `192.168.29.10:/var/nfs/mtv-imports/...`) — there's no local/block storage involved anywhere in this lab's MTV path. Also: because the PVC is `ReadWriteOnce`, any offline disk-editing tool (this fix, or `virt-v2v` itself during the original migration) needs the VM fully stopped *and* any other pod still referencing the PVC (including finished-but-not-deleted transfer pods — they hold the PVC reference even in `Completed` phase) removed first, or the attach fails outright.
 
 ---
 
@@ -297,7 +414,7 @@ Open the VM's console (`virtctl console <vm-name> -n <target-namespace>`, or the
 | 7 | Same `.so.8` error persists after adding the symlink | Symlink target used an **absolute path** (e.g. `/vmware-vix-disklib-distrib/lib64/libvixDiskLib.so.9.1.0.0`). The init container's `ENTRYPOINT` copies the whole directory to a *different* path (`/opt/vmware-vix-disklib-distrib`) at runtime, and the symlink kept pointing at the old absolute location, which no longer exists there. | Use a **bare relative filename** as the symlink target (`ln -sf libvixDiskLib.so.9 libvixDiskLib.so.8`, run from inside `lib64/`) so it resolves relative to wherever the directory ends up. Verify with `podman run --entrypoint sh ... ls -la` before pushing. |
 | 8 | Plan stuck at `ValidatingVDDK` indefinitely, or `VDDKInvalid` | The VDDK-validator Job (created in the **target namespace**, not `openshift-mtv`) can't pull the VDDK image from `openshift-mtv`'s internal imagestream — OpenShift's internal registry enforces per-namespace pull auth | `oc policy add-role-to-user system:image-puller system:serviceaccount:<target-namespace>:default -n openshift-mtv` (Step 5), done *before* creating the Plan. |
 | 9 | Plan validation takes >2 minutes on first attempt after this RBAC fix | Not a bug — the validator pod's *second* init container (`mtv-virt-v2v-rhel9`, the actual validation logic) is a large image being pulled from `registry.redhat.io` for the first time on that node | Just wait; subsequent Plans on the same node reuse the cached image and validate in seconds. |
-| 10 | Migrated VM boots (`AgentConnected=True`) but `status.interfaces` shows no IP even ~15 minutes after boot | **Unresolved / open in both POC sessions.** VM's guest network config still reflects its old ESXi static-IP setup; pod-network (masquerade) binding needs the guest to either DHCP or be given a new static IP in the pod-network's subnet | Needs an interactive console login (`virtctl console`) post-migration to check/fix guest networking (`nmcli`, `ip a`, `/etc/sysconfig/network-scripts/` or `nmconnection` files depending on RHEL version). Not yet automated — treat as a required manual post-migration step until scripted. |
+| 10 | Migrated VM boots (`AgentConnected=True`) but `status.interfaces` shows no IP even ~15 minutes after boot | **Resolved 2026-07-11 (Step 12).** `virt-v2v` doesn't rewrite the guest's NetworkManager connection profile to match the new NIC name; the stale profile (bound to the old hypervisor's device name, e.g. `ens34`, with the old LAN-subnet static IP) never activates on the new `enp1s0` device. Interactive console login (`virtctl console`) is **not viable** either — this lab's guest kernel isn't configured with `console=ttyS0`, so the serial console shows nothing at all. | Offline-edit the guest's `/etc/NetworkManager/system-connections/` via `virt-customize` (VM stopped, disk mounted through a manually-created libguestfs pod — see Step 12 for the full procedure, including two tooling gotchas: `virtctl guestfs`'s pod doesn't survive a non-interactive shell, and the image's `LIBGUESTFS_DIR` env var is a red herring — the real one libguestfs reads is `LIBGUESTFS_PATH`). Replace the stale profile with one bound to the correct interface name, `method=auto` (DHCP) — required for KubeVirt's masquerade pod-network binding. |
 | 11 | Provider misconfigured with wrong URL/port (e.g. `192.168.29.99:9460` instead of the real ESXi IP) | Simple typo/stale config carried over from an earlier attempt | Always re-verify `oc get provider <name> -o jsonpath='{.spec.url}'` matches the actual ESXi management IP before troubleshooting anything deeper. |
 
 ---
@@ -307,6 +424,7 @@ Open the VM's console (`virtctl console <vm-name> -n <target-namespace>`, or the
 - **VDDK image** (Step 2), once built and pushed, is reusable for every future ESXi Provider in this cluster — no need to rebuild per VM or per host.
 - **DNS records** (item B) are per-ESXi-host, not per-VM — one record covers every VM migrated from that host.
 - **Cross-namespace RBAC** (Step 5) is per-target-namespace — grant it once per namespace, not per migration.
+- **The guestfs pod manifest** (Step 12) is reusable verbatim for any future VM in this cluster needing an offline disk fix — just swap the PVC name.
 
 ---
 
@@ -315,7 +433,7 @@ Open the VM's console (`virtctl console <vm-name> -n <target-namespace>`, or the
 | Risk | Why it matters |
 |---|---|
 | ESXi license tier (Known Issue #2) | Structural blocker for any automation of power control; confirm before promising a "hands-off" bulk migration process |
-| Guest networking post-migration (Known Issue #10) | Currently a manual step per VM; will not scale to a bulk migration without a scripted fix |
+| Guest networking post-migration (Known Issue #10) | Fix is proven (Step 12) but still a manual step per VM — needs the interface name and old profile name identified by hand each time; will not scale to a bulk migration without wrapping Step 12 in a script (e.g. auto-detect the stale profile via `virt-ls` + regex, generate the replacement, loop over a VM list) |
 | UEFI/Secure Boot source VMs | Boots fine on the target template in testing so far, but Secure Boot itself is dropped (KubeVirt doesn't support it) — verify per-VM if Secure Boot is a hard guest requirement |
 | USB controllers, CBT-not-enabled | Both surfaced in inventory `concerns[]` for the test VM — USB devices are silently dropped, CBT-not-enabled blocks warm migration specifically |
 | No NTP in this lab | Minor clock drift risk on longer transfers; not observed to be an issue for small VMs/short transfers so far |

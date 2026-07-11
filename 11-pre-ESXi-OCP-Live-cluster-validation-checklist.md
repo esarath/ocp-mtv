@@ -36,7 +36,7 @@ Last validated: 2026-07-11 (Section 5: live end-to-end test migration executed a
 | 15 | MTV / Forklift operator | v2.7.12, all 6 pods Running | ✅ |
 | 16 | Provider: `host` (OCP target) | `Ready / Connected / Inventory=True` | ✅ |
 | 17 | Provider: `esxi-lab` (source) | Was misconfigured — wrong URL `192.168.29.99:9460` (should be `.60`), phase `Staging`, TLS test failing | ✅ Fixed — patched to `https://192.168.29.60/sdk`; now `Ready / Connected / Inventory=True`. **Note:** that `esxi-lab` object no longer exists on the cluster as of 2026-07-11 (checked, only the built-in `host` provider was present). The live migration in Section 5 created a fresh provider named `esxi8-host` instead — same target host, same settings pattern (`sdkEndpoint: esxi`). Treat `esxi-lab` as historical/console-session state, not a persistent CR. |
-| 18 | StorageClass | `nfs-storage` (default, Retain) + `mtv-storage` present | ✅ |
+| 18 | StorageClass | `nfs-storage` (default, Retain) + `mtv-storage` present | ✅ Note (confirmed 2026-07-11 while fixing guest networking — see `11A` Step 12): both are ultimately **NFS-backed** — the migrated VM's `mtv-storage` PVC showed up inside a diagnostics pod as an `nfs4` mount of `192.168.29.10:/var/nfs/mtv-imports/...`. No local/block storage anywhere in this lab's MTV path; access mode is `ReadWriteOnce` regardless of the class, so offline disk tooling always needs the VM fully stopped (and any stale pod still referencing the PVC deleted) before it can attach. |
 | 19 | NetworkAttachmentDefinition (NAD) | None found. Investigated: each worker node has only **one physical NIC (`ens18`)**, already enslaved to `br-ex` (the same OVS bridge carrying node API/management traffic). No spare NIC exists for a dedicated Multus bridge. | ✅ Resolved — see Section 3 (decision: use pod network, no NAD needed) |
 | 20 | Node capacity (CPU/mem) | Headroom on all 5 nodes (highest mem 80%, workers 46–58%) | ✅ Sufficient for 1 vCPU / 2 GB VM |
 | 21 | Existing migration Plan / NetworkMap / StorageMap | None created yet | ℹ️ Expected — pending Section 3 decision |
@@ -204,6 +204,8 @@ spec:
 NetworkMap mapped ESXi's `VM Network` → pod network (per Section 3's decision). StorageMap mapped datastore `datastore-1` → `mtv-storage` (`ReadWriteOnce`/`Filesystem`).
 
 Pipeline result: `Initialize → DiskAllocation (16Gi PVC) → ImageConversion → DiskTransferV2v (16384/16384 MB via VDDK) → VirtualMachineCreation`, all `Completed`, VM condition `Succeeded=True`. Started the resulting `VirtualMachine` (`spec.running: true`) — `VirtualMachineInstance` reached `Running`/`Ready=True` with `AgentConnected=True` and the original VMware MAC preserved (see 5.1). **Guest boots cleanly on OpenShift Virtualization.**
+
+**Update 2026-07-11 (later same day):** the VM booted but initially had no IP (`status.interfaces` had no `ipAddress` despite `AgentConnected=True`) — root cause and fix are fully documented in [`11A-COLD-POC-Migration-LIVE-procedure.md`](./11A-COLD-POC-Migration-LIVE-procedure.md#step-12--fix-stale-guest-networking-no-ip-after-boot), Step 12: `virt-v2v` leaves the guest's NetworkManager profile bound to the old hypervisor's NIC name; fixed by offline-editing the profile via `virt-customize` (VM stopped, disk mounted through a manually-created libguestfs pod) to bind the correct interface name and switch to DHCP. Confirmed working end-to-end: `10.128.2.91` assigned, reachable via TCP/22 from inside the cluster.
 
 ### 5.6 Open items for a production/bulk migration pass
 
