@@ -288,6 +288,14 @@ Open the VM's console (`virtctl console <vm-name> -n <target-namespace>`, or the
 
 ## Step 12 — Fix stale guest networking (no IP after boot)
 
+**Bulk-ready script:** [`config/validation/fix-guest-networking.sh`](./config/validation/fix-guest-networking.sh) automates everything in this section end-to-end (stop → free PVC → offline `virt-customize` fix → restart → verify) across one or more VMs in a namespace, with idempotent skip for VMs that already have a working IP. Live-tested 2026-07-11 (both the fix path and the skip path, against `rhel96`). For a single VM or migration namespace:
+```bash
+./config/validation/fix-guest-networking.sh -n <target-namespace>              # all VMs in the namespace
+./config/validation/fix-guest-networking.sh -n <target-namespace> -v vm1,vm2   # specific VMs
+./config/validation/fix-guest-networking.sh -n <target-namespace> --dry-run    # report only, no changes
+```
+Known limitation (by design, not silently ignored): assumes one NIC and one disk per VM — anything else is skipped with a warning for manual review. The rest of this section explains what the script automates, for anyone applying the fix by hand or extending the script.
+
 **Symptom:** `AgentConnected=True` (guest OS booted fine) but `oc get vmi <vm-name> -o jsonpath='{.status.interfaces}'` has no `ipAddress` field.
 
 **Root cause:** `virt-v2v` converts the disk/boot config for the new hypervisor (BIOS/UEFI, drivers, bootloader) but does **not** reliably rewrite the guest's NetworkManager connection profile to match the new NIC. The source VM's profile stays bound to its *old* device name (e.g. ESXi's `vmxnet3` shows up in-guest as `ens34`) with the *old* static IP from the source LAN subnet:
