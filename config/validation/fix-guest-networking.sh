@@ -144,10 +144,18 @@ fix_vm_networking() {
         return
     fi
 
+    # Volume may be referenced either directly (persistentVolumeClaim - typical of
+    # MTV-migrated VMs) or via a DataVolume (dataVolume.name - typical of VMs created
+    # from templates/dataVolumeTemplates). The DataVolume controller always names the
+    # underlying PVC identically to the DataVolume, so dataVolume.name doubles as the
+    # PVC name in that case.
     local pvc
     pvc=$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.volumes[0].persistentVolumeClaim.claimName}' 2>/dev/null)
     if [ -z "$pvc" ]; then
-        err "$vm: could not determine PVC name from spec.template.spec.volumes[0]"
+        pvc=$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.volumes[0].dataVolume.name}' 2>/dev/null)
+    fi
+    if [ -z "$pvc" ]; then
+        err "$vm: could not determine PVC name from spec.template.spec.volumes[0] (checked persistentVolumeClaim and dataVolume)"
         RESULTS+=("$vm|FAILED|no PVC found")
         return
     fi
